@@ -5,7 +5,7 @@ import matplotlib.font_manager as fm
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
 from matplotlib.figure import Figure
 import matplotlib.pyplot as plt
-from preprocessing import preprocess_angular_velocity
+from preprocessing import preprocess_and_sync_imu_data
 from gait_cycles import identify_gait_cycles
 from pci import calculate_pci
 from file_utils import find_latest_csv_file, save_results
@@ -262,6 +262,8 @@ class GaitAnalysisApp:
                 0).values
             sync_r_full = temp_df[f'{RIGHT_PREFIX}{SYNC_SIGNAL_SUFFIX}'].fillna(
                 0).values
+            sync_t_full = temp_df[f'{TRUNK_PREFIX}{SYNC_SIGNAL_SUFFIX}'].fillna(
+                0).values
             plot_len = min(len(sync_l_full), len(
                 sync_r_full), NUM_SAMPLES_TO_PLOT)
             if plot_len <= 0:
@@ -269,6 +271,7 @@ class GaitAnalysisApp:
 
             sync_l_short_plot = sync_l_full[:plot_len]
             sync_r_short_plot = sync_r_full[:plot_len]
+            sync_t_short_plot = sync_t_full[:plot_len]
             time_plot = np.arange(plot_len) * (SAMPLING_INTERVAL_MS / 1000.0)
 
             self.ax.clear()
@@ -276,6 +279,8 @@ class GaitAnalysisApp:
                          label=f'左 ({LEFT_PREFIX}{SYNC_SIGNAL_SUFFIX})', alpha=0.8)
             self.ax.plot(time_plot, sync_r_short_plot,
                          label=f'右 ({RIGHT_PREFIX}{SYNC_SIGNAL_SUFFIX})', linestyle='--', alpha=0.8)
+            self.ax.plot(time_plot, sync_t_short_plot,
+                         label=f'体幹 ({TRUNK_PREFIX}{SYNC_SIGNAL_SUFFIX})', linestyle=':', alpha=0.7)
             self.ax.set_title(f'同期用信号 先頭 {plot_len} サンプル (パラメータ調整用)')
             self.ax.set_xlabel('時間 (s)')
             self.ax.set_ylabel('信号値 (単位?)')
@@ -300,11 +305,11 @@ class GaitAnalysisApp:
         self.master.update_idletasks()
 
         # 変数初期化
-        sync_gyro_df = None
-        gait_events_df_segmented = pd.DataFrame()
-        gait_events_df_steady = pd.DataFrame()
-        filtered_signals = {}
-        time_vector = None
+        sync_data_df = None
+        # gait_events_df_segmented = pd.DataFrame()
+        # gait_events_df_steady = pd.DataFrame()
+        # filtered_signals = {}
+        # time_vector = None
 
         try:
             print("\n========================================")
@@ -317,37 +322,57 @@ class GaitAnalysisApp:
 
             # === ステップ 1: 前処理 ===
             print("\n[ステップ1] 角速度データの前処理...")
-            result_tuple = preprocess_angular_velocity(
+            preprocess_result = preprocess_and_sync_imu_data(  # または preprocess_angular_velocity
                 data_file=self.input_file_path, rows_to_skip=ROWS_TO_SKIP, sampling_interval_ms=SAMPLING_INTERVAL_MS,
                 right_prefix=RIGHT_PREFIX, left_prefix=LEFT_PREFIX, trunk_prefix=TRUNK_PREFIX,
-                sync_col_suffix=SYNC_SIGNAL_SUFFIX, align_col_suffix=ALIGN_TARGET_SUFFIX,
+                # run_gait_analysis の設定を使用 (_Acc_Y になっているはず)
+                sync_axis_suffix=SYNC_SIGNAL_SUFFIX,
+                align_gyro_suffix=ALIGN_TARGET_SUFFIX,
                 peak_height=user_peak_height, peak_prominence=user_peak_prominence, peak_distance=user_peak_distance
             )
-            if result_tuple is None or len(result_tuple) != 7:
-                messagebox.showerror("エラー", "前処理失敗(戻り値不正)", parent=self.master)
+
+            # 戻り値のチェック
+            if preprocess_result is None:
+                messagebox.showerror(
+                    "エラー", "前処理中に致命的なエラーが発生しました。", parent=self.master)
+                return  # finallyブロックへ
+            if not isinstance(preprocess_result, tuple) or len(preprocess_result) != 3:
+                messagebox.showerror(
+                    "エラー", "前処理からの戻り値が予期せぬ形式です。", parent=self.master)
                 return  # finallyブロックへ
 
-            sync_gyro_df, lag_samples, self.sampling_rate, peak_idx_l, peak_idx_r, _, _ = result_tuple
-            if sync_gyro_df is None or sync_gyro_df.empty:
-                messagebox.showerror("エラー", "前処理失敗(データ空)", parent=self.master)
+            sync_data_df, lags_info, self.sampling_rate = preprocess_result  # ★ アンパック ★
+
+            # sync_data_df のチェック
+            if sync_data_df is None or not isinstance(sync_data_df, pd.DataFrame) or sync_data_df.empty:
+                messagebox.showerror(
+                    "エラー", "前処理は完了しましたが、有効な同期データフレームを取得できませんでした。", parent=self.master)
                 return  # finallyブロックへ
 
-            result_message = f"前処理完了。\nLag: {lag_samples} samples"
+            # ラグ情報を表示
+            lag_L_R = lags_info.get('L_vs_R', 'N/A')
+            lag_T_R = lags_info.get('T_vs_R', 'N/A')
+            result_message = f"前処理完了。\nLag (R基準, {SYNC_SIGNAL_SUFFIX}ピーク): L={lag_L_R}, T={lag_T_R} [samples]"
             print(f"\n[成功] {result_message}")
+
+            # 保存 (DataFrameには加速度も含まれる)
             base_filename = self.input_file_path.stem
             output_sync_file = OUTPUT_FOLDER / \
-                (base_filename + OUTPUT_SUFFIX_SYNC)
-            print(f"\n[ステップ1.1] 同期済みGyro Zデータ保存中...")
-            save_results(output_sync_file, sync_gyro_df, "同期済みGyro Zデータ")
+                (base_filename + '_synchronized_imu_data.csv')  # ★ ファイル名変更推奨 ★
+            print(f"\n[ステップ1.1] 同期済み全IMUデータ保存中...")
+            save_results(output_sync_file, sync_data_df,
+                         "同期済みIMUデータ")  # ★ 説明変更 ★
 
             # === ステップ 2: 歩行周期同定 (全体データに対して) ===
             gait_events_df_all = None  # 初期化
-            if sync_gyro_df is not None:
+
+            if sync_data_df is not None:
                 print("\n[ステップ2] 歩行周期の同定 (全体) を実行中...")
                 current_swing_threshold = 100  # ★必要なら調整★
+
                 # identify_gait_cycles の呼び出し (引数はデフォルトを使用する例)
                 gait_events_result = identify_gait_cycles(
-                    sync_gyro_df=sync_gyro_df,
+                    sync_gyro_df=sync_data_df,
                     sampling_rate_hz=self.sampling_rate,
                     swing_threshold=current_swing_threshold
                     # 必要なら他のパラメータ(prominence, distanceなど)もここで指定
@@ -358,68 +383,60 @@ class GaitAnalysisApp:
                         "filtered_signals", {})
                     time_vector = gait_events_result.get("time_vector")
 
-                if gait_events_df_all is None or gait_events_df_all.empty:
-                    print("  歩行周期候補を検出できませんでした。")
+                # === ステップ 2.1: 歩行トライアル分割 ===
+                if gait_events_df_all is not None and not gait_events_df_all.empty:
+                    print("\n[ステップ2.1] 歩行トライアルの自動分割を実行中...")
+                    gait_events_df_segmented = segment_walking_trials(
+                        events_df=gait_events_df_all,
+                        max_interval_sec=MAX_IC_INTERVAL_SEC,
+                        min_ics_per_trial=MIN_ICS_PER_TRIAL
+                    )
+
+                # === ステップ 2.2: トライアルの前後除外 ===
+                if not gait_events_df_segmented.empty:
+                    print("\n[ステップ2.2] 定常歩行部分の抽出（前後除外）を実行中...")
+                    gait_events_df_steady = trim_trial_ends(
+                        df_segmented=gait_events_df_segmented,
+                        n_start=NUM_ICS_REMOVE_START,
+                        n_end=NUM_ICS_REMOVE_END
+                    )
+
+                # === ステップ 3 & 4: パラメータ計算 & 保存/表示 (有効な定常データがある場合のみ) ===
+                if not gait_events_df_steady.empty:
+                    # ステップ 2.3: 定常歩行周期データ保存
+                    output_gait_file = OUTPUT_FOLDER / \
+                        (base_filename + OUTPUT_SUFFIX_GAIT_TRIMMED)
+                    print(f"\n[ステップ2.3] 定常歩行周期データを保存中...")
+                    save_results(output_gait_file,
+                                 gait_events_df_steady, "定常歩行周期データ")
+                    print("\n--- 抽出された定常歩行周期 (最初の5件) ---")
+                    print(gait_events_df_steady[[
+                        'Leg', 'Trial_ID', 'Cycle', 'IC_Time', 'FO_Time']].head().to_string())
+                    print("---")
+
+                    # ステップ 2.4: IC/FOイベントのプロット
+                    self.plot_gait_events(
+                        gait_events_df_steady, filtered_signals, time_vector)
+
+                    # ステップ 3: 各種パラメータ計算
+                    print("\n[ステップ3] 各種歩行パラメータを計算中...")
+                    results_all = {}  # 結果をまとめる辞書
+
+                    # 3a. 時間パラメータ
+                    temporal_params = calculate_temporal_params(
+                        gait_events_df_steady)
+                    if temporal_params:
+                        results_all.update(temporal_params)
+
+                    # 3b. 運動学パラメータ
+                    if filtered_signals and time_vector is not None:
+                        kinematic_params = calculate_kinematic_params(
+                            gait_events_df_steady, filtered_signals, time_vector, self.sampling_rate)
+                        if kinematic_params:
+                            results_all.update(kinematic_params)
                 else:
-                    print(f"  {len(gait_events_df_all)} 個の歩行周期候補を検出。")
-
-            # === ステップ 2.1: 歩行トライアル分割 ===
-            if gait_events_df_all is not None and not gait_events_df_all.empty:
-                print("\n[ステップ2.1] 歩行トライアルの自動分割を実行中...")
-                gait_events_df_segmented = segment_walking_trials(
-                    events_df=gait_events_df_all,
-                    max_interval_sec=MAX_IC_INTERVAL_SEC,
-                    min_ics_per_trial=MIN_ICS_PER_TRIAL
-                )
-            else:
-                gait_events_df_segmented = pd.DataFrame()  # 空で初期化
-
-            # === ステップ 2.2: トライアルの前後除外 ===
-            if not gait_events_df_segmented.empty:
-                print("\n[ステップ2.2] 定常歩行部分の抽出（前後除外）を実行中...")
-                gait_events_df_steady = trim_trial_ends(
-                    df_segmented=gait_events_df_segmented,
-                    n_start=NUM_ICS_REMOVE_START,
-                    n_end=NUM_ICS_REMOVE_END
-                )
-            else:
-                gait_events_df_steady = pd.DataFrame()  # 空で初期化
-
-            # === ステップ 3 & 4: パラメータ計算 & 保存/表示 (有効な定常データがある場合のみ) ===
-            if not gait_events_df_steady.empty:
-                # ステップ 2.3: 定常歩行周期データ保存
-                output_gait_file = OUTPUT_FOLDER / \
-                    (base_filename + OUTPUT_SUFFIX_GAIT_TRIMMED)
-                print(f"\n[ステップ2.3] 定常歩行周期データを保存中...")
-                save_results(output_gait_file,
-                             gait_events_df_steady, "定常歩行周期データ")
-                print("\n--- 抽出された定常歩行周期 (最初の5件) ---")
-                print(gait_events_df_steady[[
-                      'Leg', 'Trial_ID', 'Cycle', 'IC_Time', 'FO_Time']].head().to_string())
-                print("---")
-
-                # ステップ 2.4: IC/FOイベントのプロット
-                self.plot_gait_events(
-                    gait_events_df_steady, filtered_signals, time_vector)
-
-                # ステップ 3: 各種パラメータ計算
-                print("\n[ステップ3] 各種歩行パラメータを計算中...")
-                results_all = {}  # 結果をまとめる辞書
-
-                # 3a. 時間パラメータ
-                temporal_params = calculate_temporal_params(
-                    gait_events_df_steady)
-                if temporal_params:
-                    results_all.update(temporal_params)
-
-                # 3b. 運動学パラメータ
-                if filtered_signals and time_vector is not None:
-                    kinematic_params = calculate_kinematic_params(
-                        gait_events_df_steady, filtered_signals, time_vector, self.sampling_rate)
-                    if kinematic_params:
-                        results_all.update(kinematic_params)
-                else:
-                    print("警告: Kinematic params計算に必要な信号なし")
+                    # ★★★ このメッセージが表示されている ★★★
+                    print("\n[情報] 有効な定常歩行周期データがないため、パラメータ計算・イベントプロットはスキップします。")
 
                 # 3c. PCI パラメータ
                 pci_params = calculate_pci(gait_events_df_steady)
