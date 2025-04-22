@@ -6,7 +6,7 @@ from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolb
 from matplotlib.figure import Figure
 import matplotlib.pyplot as plt
 from preprocessing import preprocess_and_sync_imu_data
-from gait_cycles import identify_gait_cycles
+from gait_cycles import identify_gait_cycles, identify_ics_from_trunk_accel
 from pci import calculate_pci
 from file_utils import find_latest_csv_file, save_results
 from temporal_parameters import calculate_temporal_params
@@ -67,6 +67,13 @@ MIN_ICS_PER_TRIAL = 11    # トライアルとみなす最小IC数 (これ未満
 # 定常歩行抽出用パラメータ
 NUM_ICS_REMOVE_START = 3  # 除外する先頭IC数
 NUM_ICS_REMOVE_END = 5   # 除外する末尾IC数
+
+# 体幹検出用パラメータ
+TRUNK_IC_FILTER_CUTOFF = 20.0  # 体幹加速度フィルター周波数 (Hz)
+TRUNK_IC_PEAK_HEIGHT = 0.1     # 体幹AP加速度 正ピークの最小高さ (単位注意!)
+TRUNK_IC_PEAK_PROMINENCE = 0.1  # 体幹AP加速度 正ピークの最小突出度
+TRUNK_IC_PEAK_DISTANCE_MS = 200  # 体幹AP加速度 正ピーク間の最小時間 (ms)
+TRUNK_LR_THRESHOLD = 0.0         # 体幹ML加速度 左右判定の閾値
 
 # --- 列名定義関数 ---
 
@@ -305,11 +312,11 @@ class GaitAnalysisApp:
         self.master.update_idletasks()
 
         # 変数初期化
-        sync_data_df = None
-        # gait_events_df_segmented = pd.DataFrame()
-        # gait_events_df_steady = pd.DataFrame()
-        # filtered_signals = {}
-        # time_vector = None
+        sync_gyro_df = None
+        gait_events_df_segmented = pd.DataFrame()
+        gait_events_df_steady = pd.DataFrame()
+        filtered_signals = {}
+        time_vector = None
 
         try:
             print("\n========================================")
@@ -383,6 +390,61 @@ class GaitAnalysisApp:
                         "filtered_signals", {})
                     time_vector = gait_events_result.get("time_vector")
 
+            # === ステップ 2bis: 歩行周期同定 (体幹 Acc Z/X ベース IC+LR) ===
+            ic_events_df_trunk = None  # 結果格納用
+            filtered_ap_signal = None  # ★ AP信号用変数
+            filtered_ml_signal = None  # ★ ML信号用変数
+
+            if sync_data_df is not None:
+                print("\n[ステップ2bis] IC同定(左右判定含む, 体幹Acc) を実行中...")
+                # ★ 体幹ベースの関数呼び出し ★
+                ic_detection_result_trunk = identify_ics_from_trunk_accel(
+                    sync_data_df=sync_data_df,
+                    sampling_rate_hz=self.sampling_rate,
+                    ap_axis_col='T_Acc_Z_aligned',  # Z=AP
+                    ml_axis_col='T_Acc_X_aligned',  # X=ML と仮定
+                    filter_cutoff_acc=TRUNK_IC_FILTER_CUTOFF,  # 設定値を使用
+                    ic_peak_height=TRUNK_IC_PEAK_HEIGHT,
+                    ic_peak_prominence=TRUNK_IC_PEAK_PROMINENCE,
+                    ic_peak_distance_ms=TRUNK_IC_PEAK_DISTANCE_MS,
+                    lr_threshold=TRUNK_LR_THRESHOLD
+                    # 必要ならフィルター周波数やピーク検出パラメータも渡す
+                )
+                if ic_detection_result_trunk is not None and isinstance(ic_detection_result_trunk, dict):
+                    ic_events_df_trunk = ic_detection_result_trunk.get(
+                        "ic_events_df")
+                    filtered_ap_signal = ic_detection_result_trunk.get(
+                        "filtered_ap_signal")  # AP信号取得
+                    filtered_ml_signal = ic_detection_result_trunk.get(
+                        "filtered_ml_signal")  # ML信号取得
+                    # time_vector は共通なので上書きしない
+
+                if ic_events_df_trunk is None or ic_events_df_trunk.empty:
+                    print("  体幹AccベースのICイベントを検出できませんでした。")
+                else:
+                    print(
+                        f"  {len(ic_events_df_trunk)} 個の体幹AccベースICイベント(左右判定試行済)を検出。")
+                    base_filename = self.input_file_path.stem
+                    output_gait_file_trunk_ic = OUTPUT_FOLDER / \
+                        (base_filename + "_trunk_ic_events.csv")
+                    print(f"\n[ステップ2bis.1] 体幹ICイベントデータを保存中...")
+                    save_results(output_gait_file_trunk_ic,
+                                 ic_events_df_trunk, "ICイベントデータ(体幹AccZ/LR)")
+                    print("\n--- 検出された体幹ICイベント (最初の5件) ---")
+                    print(ic_events_df_trunk[[
+                          'Leg', 'Cycle', 'IC_Time']].head().to_string())
+                    print("---")
+                    # ★ 体幹ICプロット関数呼び出し ★
+                    # plot_gait_events は下腿用なので、別名のプロット関数を呼び出す
+                    if filtered_ap_signal is not None and filtered_ml_signal is not None and time_vector is not None:
+                        self.plot_trunk_ics(  # ★ 呼び出す関数名を plot_trunk_ics とする ★
+                            ic_events_df=ic_events_df_trunk,  # ★ 正しい変数 ★
+                            filtered_ap_signal=filtered_ap_signal,  # AP信号
+                            filtered_ml_signal=filtered_ml_signal,  # ML信号
+                            time_vector=time_vector              # 時間ベクトル
+                        )
+                    else:
+                        print("  警告: 体幹ICプロットに必要な信号データまたは時間ベクトルが不足しています。")
                 # === ステップ 2.1: 歩行トライアル分割 ===
                 if gait_events_df_all is not None and not gait_events_df_all.empty:
                     print("\n[ステップ2.1] 歩行トライアルの自動分割を実行中...")
@@ -591,7 +653,101 @@ class GaitAnalysisApp:
         except Exception as e:
             print(f"  エラー: IC/FOイベントのプロット中にエラー: {e}")
 
+# --- 体幹ICイベントプロット用メソッド ---
+    def plot_trunk_ics(self, ic_events_df, filtered_ap_signal, filtered_ml_signal, time_vector):
+        print("\n[ステップ2.4(暫定)] IC イベント (体幹Accベース) をグラフにプロットします...")
+        # 入力データの基本的なチェック
+        if ic_events_df is None or ic_events_df.empty:
+            print("プロットするICイベントなし")
+            return
+        
+        if filtered_ap_signal is None or filtered_ml_signal is None or time_vector is None:
+            print("プロット用信号/時間ベクトルなし")
+            return
+        if len(filtered_ap_signal) != len(time_vector) or len(filtered_ml_signal) != len(time_vector):
+            print("警告: プロット用信号/時間ベクトル長不整合")
+            return
+
+        try:
+            fig_events, axes = plt.subplots(
+                2, 1, figsize=(14, 8), sharex=True)
+            fig_events.suptitle(
+                f'検出されたICイベント (体幹Acc) - {self.input_file_path.name}')
+            plot_successful = False
+
+            signal_ap = filtered_ap_signal  # AP信号(Z軸仮定)
+            signal_ml = filtered_ml_signal  # ML信号(X軸仮定)
+
+            # --- 上段: AP加速度とICマーカー ---
+            ax_ap = axes[0]
+            ax_ap.plot(time_vector, signal_ap,
+                        label=f'Trunk AP Acc (Z, Filtered)', alpha=0.7, color='k')
+            for leg, color, marker in [('L', 'blue', 'o'), ('R', 'red', 'o')]:  # 左右色分け
+                leg_events = ic_events_df[ic_events_df['Leg'] == leg]
+                ic_indices = leg_events['IC_Index'].dropna().astype(
+                    int).values
+                valid_ic = ic_indices[(ic_indices >= 0) & (
+                    ic_indices < len(signal_ap))]
+                if len(valid_ic) > 0:
+                    ax_ap.plot(time_vector[valid_ic], signal_ap[valid_ic], marker=marker,
+                                color=color, markersize=6, label=f'IC ({leg})', linestyle='None')
+            # Unknownもプロット
+            unknown_events = ic_events_df[ic_events_df['Leg'] == 'Unknown']
+            if not unknown_events.empty:
+                unk_ic_indices = unknown_events['IC_Index'].dropna().astype(
+                    int).values
+                valid_unk_ic = unk_ic_indices[(unk_ic_indices >= 0) & (
+                    unk_ic_indices < len(signal_ap))]
+                if len(valid_unk_ic) > 0:
+                    ax_ap.plot(time_vector[valid_unk_ic], signal_ap[valid_unk_ic], marker='x',
+                                color='gray', markersize=6, label=f'IC (Unknown)', linestyle='None')
+            ax_ap.set_title(f'体幹 AP(Z軸) 加速度 と検出されたIC')
+            ax_ap.set_ylabel('加速度 (単位?)')
+            ax_ap.legend(loc='upper right')
+            ax_ap.grid(True)
+            plot_successful = True
+
+            # --- 下段: ML加速度とICマーカー ---
+            ax_ml = axes[1]
+            ax_ml.plot(time_vector, signal_ml,
+                        label=f'Trunk ML Acc (X, Filtered)', alpha=0.7, color='k')
+            ax_ml.axhline(0, color='gray', linestyle='--', linewidth=0.5)
+            for leg, color, marker in [('L', 'blue', 'o'), ('R', 'red', 'o')]:  # 左右色分け
+                leg_events = ic_events_df[ic_events_df['Leg'] == leg]
+                ic_indices = leg_events['IC_Index'].dropna().astype(
+                    int).values
+                valid_ic = ic_indices[(ic_indices >= 0) & (
+                    ic_indices < len(signal_ml))]
+                if len(valid_ic) > 0:
+                    ax_ml.plot(time_vector[valid_ic], signal_ml[valid_ic], marker=marker,
+                                color=color, markersize=6, label=f'IC ({leg})', linestyle='None')
+            if not unknown_events.empty:  # Unknownもプロット
+                unk_ic_indices = unknown_events['IC_Index'].dropna().astype(
+                    int).values
+                valid_unk_ic = unk_ic_indices[(unk_ic_indices >= 0) & (
+                    unk_ic_indices < len(signal_ml))]
+                if len(valid_unk_ic) > 0:
+                    ax_ml.plot(time_vector[valid_unk_ic], signal_ml[valid_unk_ic], marker='x',
+                                color='gray', markersize=6, label=f'IC (Unknown)', linestyle='None')
+            ax_ml.set_title(f'体幹 ML(X軸) 加速度 と検出されたIC（左右判定に使用）')
+            ax_ml.set_ylabel('加速度 (単位?)')
+            ax_ml.legend(loc='upper right')
+            ax_ml.grid(True)
+
+            if plot_successful:
+                ax_ml.set_xlabel('時間 (s)')
+                plt.tight_layout(rect=[0, 0.03, 1, 0.95])
+                plt.show(block=False)
+            else:
+                plt.close(fig_events)
+                print("ICプロット不可")
+        except Exception as e:
+            print(f"  エラー: ICイベントプロット中にエラー: {e}")
+            if 'fig_events' in locals() and plt.fignum_exists(fig_events.number):
+                plt.close(fig_events)
+
     # --- 同期済み角速度の最終プロット用メソッド ---
+
     def plot_final_synchronized_data(self, sync_gyro_df):
         if sync_gyro_df is not None:
             print(f"\n[ステップ4] 同期済み{ALIGN_TARGET_SUFFIX}のグラフ (先頭部分) を表示します...")

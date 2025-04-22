@@ -175,6 +175,8 @@ def preprocess_and_sync_imu_data(data_file, rows_to_skip=11, sampling_interval_m
         for prefix, suffix in signals_to_process:
             col_name = f'{prefix}{suffix}'
             output_col_name = f'{col_name}_aligned'
+            if col_name not in df.columns:
+                raise KeyError(f"列 '{col_name}' が元のDFにありません。")
             original_signal = df[col_name].fillna(0).values
             start_idx = start_indices[prefix]
             end_idx = start_idx + aligned_length
@@ -189,6 +191,10 @@ def preprocess_and_sync_imu_data(data_file, rows_to_skip=11, sampling_interval_m
             if prefix == left_prefix and suffix == align_gyro_suffix:
                 aligned_signal = -aligned_signal
                 print(f"  情報: 左 {align_gyro_suffix} の符号を反転しました。")
+            #体幹の信号も反転
+            if prefix == trunk_prefix and suffix == '_Acc_Z':
+                aligned_signal = -aligned_signal
+                print(f"  情報: 体幹 Acc Z ({col_name}) の符号を反転しました。")
 
             aligned_data[output_col_name] = aligned_signal
 
