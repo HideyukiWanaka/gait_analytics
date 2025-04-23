@@ -205,123 +205,161 @@ def identify_gait_cycles(sync_gyro_df, sampling_rate_hz,
     }
 
 
+# gait_cycles.py 内の関数
+
+# ... (lowpass_filter 関数, identify_gait_cycles 関数 はそのまま) ...
+
+# --- 関数2: 体幹 Acc Z ベース IC検出 + Gyro Y 瞬間値 LR判定 + 補間 ---
 def identify_ics_from_trunk_accel(sync_data_df, sampling_rate_hz,
-                                  ap_axis_col='T_Acc_Z_aligned',  # 前後(AP)=Z軸
-                                  # 左右(ML)=X軸 と仮定
-                                  ml_axis_col='T_Acc_X_aligned',
+                                  ap_axis_col='T_Acc_Z_aligned',   # 前後(AP)=Z軸
+                                  lr_gyro_axis_col='T_Gyro_Y_aligned',  # 左右判定用: Yaw=GyroY
                                   filter_cutoff_acc=20.0,
+                                  filter_cutoff_gyro=15.0,  # Gyro用フィルターカットオフ
                                   ic_peak_height=0.1, ic_peak_prominence=0.1, ic_peak_distance_ms=200,
-                                  lr_threshold=0.0):
+                                  min_step_time_sec=0.3,
+                                  lr_gyro_threshold=5.0):  # 左右判定ヨー角速度閾値(deg/s?)
     """
-    同期済みの体幹前方(AP)加速度データから IC (正ピーク@ゼロクロス前) を検出し、
-    ML加速度から左右を判定する。(FO検出は未実装)
+    体幹前方(AP)加速度から IC (正ピーク@ゼロクロス前) を検出し、
+    体幹ヨー(Yaw=Y軸)角速度の【瞬間値】から左右を判定し、最短ステップ時間フィルタと
+    前後関係によるUnknown補間を行う。
     """
     print(
-        f"--- [Function@gait_cycles] IC同定開始 (体幹 Acc AP={ap_axis_col}, ML={ml_axis_col}, cutoff={filter_cutoff_acc}Hz) ---")
+        f"--- [Function@gait_cycles] IC同定(GyroY瞬間値+補間)開始 (体幹 Acc={ap_axis_col}, Gyro={lr_gyro_axis_col}) ---")
 
     # --- 初期化 ---
-    ic_events_df = pd.DataFrame()  # 結果DF (空で初期化)
-    filtered_ap_signal = None     # フィルター済みAP信号
-    filtered_ml_signal = None     # フィルター済みML信号
-    time_sec = None               # 時間ベクトル
+    ic_events_df = pd.DataFrame()
+    filtered_ap_signal = None
+    filtered_lr_gyro_signal = None
+    time_sec = None
 
     # --- 入力チェック ---
-    required_cols = {ap_axis_col, ml_axis_col, 'time_aligned_sec'}
+    required_cols = {ap_axis_col, lr_gyro_axis_col, 'time_aligned_sec'}
     if sync_data_df is None or sync_data_df.empty or not required_cols.issubset(sync_data_df.columns):
         print(f"  エラー: IC同定に必要なデータ ({required_cols}) が不足。")
-        # ★★★ エラー時も None を含む辞書を返す ★★★
-        return {"ic_events_df": ic_events_df, "filtered_ap_signal": None, "filtered_ml_signal": None, "time_vector": None}
+        return {"ic_events_df": ic_events_df, "filtered_ap_signal": None, "filtered_lr_gyro_signal": None, "time_vector": None}
+
+    results = []  # イベント一時格納用
+    dt = 1.0 / sampling_rate_hz
+    ic_peak_distance_samples = int(
+        ic_peak_distance_ms / 1000 * sampling_rate_hz)
+    min_step_samples = int(min_step_time_sec * sampling_rate_hz)
+    time_sec = sync_data_df['time_aligned_sec'].values
 
     try:
-        time_sec = sync_data_df['time_aligned_sec'].values
         signal_ap_raw = sync_data_df[ap_axis_col].values
-        signal_ml_raw = sync_data_df[ml_axis_col].values
-        dt = 1.0 / sampling_rate_hz
-        ic_peak_distance_samples = int(
-            ic_peak_distance_ms / 1000 * sampling_rate_hz)
+        signal_lr_gyro_raw = sync_data_df[lr_gyro_axis_col].values
 
         # 1. フィルタリング
-        print("  DEBUG: Filtering AP/ML signals...")
         signal_ap_filt = lowpass_filter(
             signal_ap_raw, cutoff=filter_cutoff_acc, fs=sampling_rate_hz)
-        signal_ml_filt = lowpass_filter(
-            signal_ml_raw, cutoff=filter_cutoff_acc, fs=sampling_rate_hz)
-        if signal_ap_filt is None or signal_ml_filt is None:
+        signal_lr_gyro_filt = lowpass_filter(
+            signal_lr_gyro_raw, cutoff=filter_cutoff_gyro, fs=sampling_rate_hz)
+        if signal_ap_filt is None or signal_lr_gyro_filt is None:
             raise ValueError("信号フィルタリング失敗。")
-        print(
-            f"  DEBUG: Filtering successful. AP shape: {signal_ap_filt.shape}, ML shape: {signal_ml_filt.shape}")
 
-        # 2. DCオフセット除去
-        print("  DEBUG: Removing DC offset...")
+        # 2. DCオフセット除去 (AP軸のみ)
         mean_ap = np.mean(signal_ap_filt)
         signal_ap_proc = signal_ap_filt - mean_ap
-        mean_ml = np.mean(signal_ml_filt)
-        signal_ml_proc = signal_ml_filt - mean_ml
-        # ★★★ プロット用に返す変数を確定 ★★★
-        filtered_ap_signal = signal_ap_proc  # 処理後の信号を返す
-        filtered_ml_signal = signal_ml_proc  # 処理後の信号を返す
+        filtered_ap_signal = signal_ap_proc     # プロット用に保持 (処理後)
+        filtered_lr_gyro_signal = signal_lr_gyro_filt  # プロット用に保持 (フィルター後)
 
-        # 3. IC検出ロジック
-        print("  DEBUG: Detecting peaks and zero crossings...")
+        # 3. IC検出ロジック (AP軸の正ピーク@ゼロクロス前)
         positive_peak_indices, _ = find_peaks(
             signal_ap_proc, height=ic_peak_height, prominence=ic_peak_prominence, distance=ic_peak_distance_samples)
         zero_crossings_pos_neg = np.where(
             (signal_ap_proc[:-1] > 0) & (signal_ap_proc[1:] <= 0))[0]
         print(
-            f"  DEBUG: Found {len(positive_peak_indices)} positive peaks, {len(zero_crossings_pos_neg)} pos->neg zero crossings.")
+            f"  検出されたAP正ピーク候補数: {len(positive_peak_indices)}, 正→負ゼロクロス数: {len(zero_crossings_pos_neg)}")
+        if len(positive_peak_indices) == 0 or len(zero_crossings_pos_neg) == 0:
+            raise StopIteration("正ピークorゼロクロスなし")
+        initial_ic_indices = []
+        for peak_idx in positive_peak_indices:
+            next_zc_indices = zero_crossings_pos_neg[zero_crossings_pos_neg > peak_idx]
+            if len(next_zc_indices) > 0:
+                first_next_zc_idx = next_zc_indices[0]
+                intervening_peaks = positive_peak_indices[(positive_peak_indices > peak_idx) & (
+                    positive_peak_indices < first_next_zc_idx)]
+                if len(intervening_peaks) == 0:
+                    initial_ic_indices.append(peak_idx)
+        print(f"  ゼロクロス直前の正ピークとして同定されたIC候補数: {len(initial_ic_indices)}")
+        if len(initial_ic_indices) == 0:
+            print("警告: 条件を満たすIC候補なし。")
+            raise StopIteration
 
+        # 4. 最短ステップ時間フィルター
         valid_ic_indices = []
-        if len(positive_peak_indices) > 0 and len(zero_crossings_pos_neg) > 0:
-            print("  DEBUG: Associating peaks and zero crossings...")
-            for peak_idx in positive_peak_indices:
-                next_zc_indices = zero_crossings_pos_neg[zero_crossings_pos_neg > peak_idx]
-                if len(next_zc_indices) > 0:
-                    first_next_zc_idx = next_zc_indices[0]
-                    intervening_peaks = positive_peak_indices[(positive_peak_indices > peak_idx) & (
-                        positive_peak_indices < first_next_zc_idx)]
-                    if len(intervening_peaks) == 0:
-                        valid_ic_indices.append(peak_idx)
-        print(f"  DEBUG: Found {len(valid_ic_indices)} valid IC indices.")
+        if initial_ic_indices:
+            sorted_indices = sorted(initial_ic_indices)
+            valid_ic_indices.append(sorted_indices[0])
+            for i in range(1, len(sorted_indices)):
+                interval = sorted_indices[i] - valid_ic_indices[-1]
+                if interval >= min_step_samples:
+                    valid_ic_indices.append(sorted_indices[i])
+        print(
+            f"  最短ステップ時間({min_step_time_sec}s)フィルター後のIC数: {len(valid_ic_indices)}")
+        if len(valid_ic_indices) == 0:
+            print("警告: 時間フィルター後にICなし。")
+            raise StopIteration
 
-        # 4. 結果のDataFrame作成
-        if len(valid_ic_indices) > 0:
-            results = []
-            for i, ic_idx in enumerate(sorted(valid_ic_indices)):
-                ic_time_val = time_sec[ic_idx] if 0 <= ic_idx < len(
-                    time_sec) else np.nan
-                leg_label = "Unknown"
-                if 0 <= ic_idx < len(signal_ml_proc):
-                    ml_value_at_ic = signal_ml_proc[ic_idx]
-                    if ml_value_at_ic > lr_threshold:
-                        leg_label = 'R'
-                    elif ml_value_at_ic < -lr_threshold:
-                        leg_label = 'L'
-                results.append({"Leg": leg_label, "Cycle": i + 1, "IC_Index": ic_idx,
-                               "FO_Index": pd.NA, "IC_Time": ic_time_val, "FO_Time": pd.NA})
-            ic_events_df = pd.DataFrame(results)  # ★ ic_events_df がここで更新される
-        else:
-            print("  警告: 条件を満たすICが見つかりませんでした。")
-            # ic_events_df は空のまま
+        # 5. IC記録と左右判定 (★ Gyro Y の【瞬間値】を使用 ★)
+        for i, ic_idx in enumerate(valid_ic_indices):
+            ic_time_val = time_sec[ic_idx] if 0 <= ic_idx < len(
+                time_sec) else np.nan
+            leg_label = "Unknown"
+            if 0 <= ic_idx < len(signal_lr_gyro_filt):
+                gyro_y_value_at_ic = signal_lr_gyro_filt[ic_idx]  # ★ 瞬間値を取得 ★
+                # 正の値を右(R), 負の値を左(L) とする (要確認/調整)
+                if gyro_y_value_at_ic > lr_gyro_threshold:
+                    leg_label = 'R'
+                elif gyro_y_value_at_ic < -lr_gyro_threshold:
+                    leg_label = 'L'
+                # else: 閾値内なら Unknown
+            results.append({"Leg": leg_label, "Cycle": i + 1, "IC_Index": ic_idx,
+                           "FO_Index": pd.NA, "IC_Time": ic_time_val, "FO_Time": pd.NA})
 
+        ic_events_df = pd.DataFrame(results)  # まず一次判定の結果でDF作成
+
+        # 6. Unknown補間処理 (変更なし)
+        if not ic_events_df.empty:  # DFが空でなければ実行
+            print("  左右判定 'Unknown' の補間処理を実行...")
+            interpolated_count = 0
+            unknown_indices = ic_events_df.index[ic_events_df['Leg'] == 'Unknown'].tolist(
+            )
+            for k in unknown_indices:
+                if k > 0 and k < len(ic_events_df) - 1:
+                    prev_leg = ic_events_df.loc[k - 1, 'Leg']
+                    next_leg = ic_events_df.loc[k + 1, 'Leg']
+                    if prev_leg == 'R' and next_leg == 'R':
+                        ic_events_df.loc[k, 'Leg'] = 'L'
+                        interpolated_count += 1
+                    elif prev_leg == 'L' and next_leg == 'L':
+                        ic_events_df.loc[k, 'Leg'] = 'R'
+                        interpolated_count += 1
+            print(f"  補間によって {interpolated_count} 個の 'Unknown' ラベルを更新しました。")
+            unknown_count_final = len(
+                ic_events_df[ic_events_df['Leg'] == 'Unknown'])
+            if unknown_count_final > 0:
+                print(f"  警告: 最終的に {unknown_count_final} 個のICで左右判定できませんでした。")
+
+    except StopIteration:
+        print(f"--- [Function@gait_cycles] IC同定(体幹)は途中で終了 ---")
     except Exception as e:
         print(f"エラー: IC同定(体幹)処理中に予期せぬエラー: {e}")
-        # エラーが発生しても、できるだけフィルター済み信号と時間は返すようにする
-
-    # --- 関数の最後で必ず辞書を返す ---
-    print(f"--- [Function@gait_cycles] IC同定(体幹)終了 ---")
-    # ★★★ 最終的な戻り値の内容を DEBUG プリント ★★★
-    print(f"  DEBUG: Returning dictionary:")
-    print(f"    ic_events_df is empty: {ic_events_df.empty}")
-    print(
-        f"    filtered_ap_signal shape: {filtered_ap_signal.shape if filtered_ap_signal is not None else 'None'}")
-    print(
-        f"    filtered_ml_signal shape: {filtered_ml_signal.shape if filtered_ml_signal is not None else 'None'}")
-    print(
-        f"    time_vector shape: {time_sec.shape if time_sec is not None else 'None'}")
-    # ★★★ ここまで ★★★
-    return {
-        "ic_events_df": ic_events_df,
-        "filtered_ap_signal": filtered_ap_signal,
-        "filtered_ml_signal": filtered_ml_signal,
-        "time_vector": time_sec
-    }
+    finally:
+        # --- 関数の最後で必ず辞書を返す ---
+        print(f"--- [Function@gait_cycles] IC同定(体幹)終了処理 ---")
+        print(f"  DEBUG: Returning dictionary:")
+        print(
+            f"    ic_events_df empty: {ic_events_df.empty if isinstance(ic_events_df, pd.DataFrame) else 'N/A'}")
+        print(
+            f"    filtered_ap_signal shape: {filtered_ap_signal.shape if filtered_ap_signal is not None else 'None'}")
+        print(
+            f"    filtered_lr_gyro_signal shape: {filtered_lr_gyro_signal.shape if filtered_lr_gyro_signal is not None else 'None'}")
+        print(
+            f"    time_vector shape: {time_sec.shape if time_sec is not None else 'None'}")
+        return {
+            "ic_events_df": ic_events_df,
+            "filtered_ap_signal": filtered_ap_signal,
+            "filtered_lr_gyro_signal": filtered_lr_gyro_signal,  # キー名も Gyro に変更
+            "time_vector": time_sec
+        }
