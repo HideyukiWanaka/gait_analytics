@@ -320,26 +320,49 @@ def identify_ics_from_trunk_accel(sync_data_df, sampling_rate_hz,
         ic_events_df = pd.DataFrame(results)  # まず一次判定の結果でDF作成
 
         # 6. Unknown補間処理 (変更なし)
-        if not ic_events_df.empty:  # DFが空でなければ実行
-            print("  左右判定 'Unknown' の補間処理を実行...")
+        if not ic_events_df.empty: # DFが空でなければ実行
+            print("  左右判定 'Unknown' の補間処理（連続対応版）を実行...")
             interpolated_count = 0
-            unknown_indices = ic_events_df.index[ic_events_df['Leg'] == 'Unknown'].tolist(
-            )
-            for k in unknown_indices:
-                if k > 0 and k < len(ic_events_df) - 1:
-                    prev_leg = ic_events_df.loc[k - 1, 'Leg']
-                    next_leg = ic_events_df.loc[k + 1, 'Leg']
-                    if prev_leg == 'R' and next_leg == 'R':
-                        ic_events_df.loc[k, 'Leg'] = 'L'
+            last_known_leg = None # 最後に確定した脚のラベルを保持
+            first_known_idx = -1
+
+            # 最初に L/R が確定しているインデックスを探す
+            for idx in ic_events_df.index:
+                if ic_events_df.loc[idx, 'Leg'] != 'Unknown':
+                    last_known_leg = ic_events_df.loc[idx, 'Leg']
+                    first_known_idx = idx
+                    break # 見つかったらループを抜ける
+
+            if last_known_leg is not None: # L/Rが1つでも見つかった場合
+                # 最初の確定ラベルより前のUnknownを補間 (交互パターンと仮定)
+                current_leg_to_assign = 'R' if last_known_leg == 'L' else 'L'
+                for k in range(first_known_idx - 1, -1, -1): # 後ろから前に処理
+                    if ic_events_df.loc[k, 'Leg'] == 'Unknown':
+                        ic_events_df.loc[k, 'Leg'] = current_leg_to_assign
+                        current_leg_to_assign = 'R' if current_leg_to_assign == 'L' else 'L' # 次に割り当てる脚を反転
                         interpolated_count += 1
-                    elif prev_leg == 'L' and next_leg == 'L':
-                        ic_events_df.loc[k, 'Leg'] = 'R'
-                        interpolated_count += 1
+                    else:
+                         # 予期せず L/R が見つかったらループを抜ける（基本ないはず）
+                         break
+
+                # 最初の確定ラベル以降のUnknownを補間 (交互パターン)
+                for k in range(first_known_idx + 1, len(ic_events_df)):
+                    # last_known_leg は前のループで最後に確定したラベルのはず
+                    if ic_events_df.loc[k, 'Leg'] == 'Unknown':
+                         # 直前のラベルと逆のラベルを割り当てる
+                         last_known_leg = 'R' if last_known_leg == 'L' else 'L'
+                         ic_events_df.loc[k, 'Leg'] = last_known_leg
+                         interpolated_count += 1
+                    else:
+                        # L/Rが見つかったら、それを新しい基準とする
+                        last_known_leg = ic_events_df.loc[k, 'Leg']
+            else:
+                 print("  警告: L/Rが確定したICが1つも見つからないため、補間できません。")
+
+
             print(f"  補間によって {interpolated_count} 個の 'Unknown' ラベルを更新しました。")
-            unknown_count_final = len(
-                ic_events_df[ic_events_df['Leg'] == 'Unknown'])
-            if unknown_count_final > 0:
-                print(f"  警告: 最終的に {unknown_count_final} 個のICで左右判定できませんでした。")
+            unknown_count_final = len(ic_events_df[ic_events_df['Leg'] == 'Unknown'])
+            if unknown_count_final > 0: print(f"  警告: 最終的に {unknown_count_final} 個のICで左右判定できませんでした。")
 
     except StopIteration:
         print(f"--- [Function@gait_cycles] IC同定(体幹)は途中で終了 ---")
