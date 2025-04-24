@@ -149,41 +149,58 @@ def segment_walking_trials(events_df, max_interval_sec, min_ics_per_trial):
 
 # --- トライアルの最初と最後を除外する関数 ---
 def trim_trial_ends(df_segmented, n_start=3, n_end=5):
-    """Trial_ID と Leg でグループ化し、各グループの先頭n_start個と末尾n_end個のICを除外"""
+    """
+    Trial_ID 単位でソートされた IC を対象に、
+    * 先頭から n_start 個
+    * 末尾から n_end 個
+    をまとめて除外する。
+
+    ※ Leg の左右は区別せず「最初に現れた IC から 3 つ」を削除する。
+       末尾も「最後に現れた IC から 5 つ」を削除する。
+    """
     print(f"--- トライアルの前後除外開始 (先頭: {n_start}歩, 末尾: {n_end}歩) ---")
     if df_segmented is None or df_segmented.empty:
         return pd.DataFrame()
-    # Leg 列が存在するか確認 (体幹ICのみの場合は存在しない可能性 -> スキップ)
-    if 'Leg' not in df_segmented.columns or 'Trial_ID' not in df_segmented.columns:
-        print("警告: 前後除外に必要な Leg または Trial_ID 列がありません。スキップします。")
-        return df_segmented  # そのまま返す
 
-    min_required_ics = n_start + n_end + 1
+    if 'Trial_ID' not in df_segmented.columns:
+        print("警告: Trial_ID 列がありません。前後除外をスキップします。")
+        return df_segmented
+
     trimmed_groups = []
-    # Trial_ID と Leg でグループ化し、IC_Indexでソートしておく
-    grouped = df_segmented.sort_values(by='IC_Index').groupby(
-        ['Trial_ID', 'Leg'], sort=False)
     total_removed_count = 0
     original_count = len(df_segmented)
 
-    for name, group in grouped:
-        if len(group) >= min_required_ics:
-            # iloc を使って先頭 n_start 個と末尾 n_end 個を除外
-            trimmed_group = group.iloc[n_start:-n_end]
-            trimmed_groups.append(trimmed_group)
-            total_removed_count += len(group) - len(trimmed_group)
+    # Trial_ID 毎に時系列順 (IC_Index) で並べて前後を除去
+    grouped = df_segmented.sort_values(by='IC_Index').groupby('Trial_ID', sort=False)
+
+    for trial_id, group in grouped:
+        group_len = len(group)
+
+        # --- 10歩以下の短いシーケンスはまるごと除外 ---
+        if group_len <= 10:
+            total_removed_count += group_len
+            continue  # 次の trial へ
+
+        # --- 先頭 n_start 個を除去 ---
+        start_cut = n_start  # ここに来る時点で group_len > 10 かつ > n_start
+
+        # --- 末尾 n_end 個を除去 (可能なら) ---
+        if (group_len - start_cut) > n_end:
+            end_cut = n_end
         else:
-            # 条件を満たさないグループは完全に除外される
-            total_removed_count += len(group)
+            end_cut = 0  # 末尾カットは諦める
+
+        group_sorted = group.sort_values('IC_Time')
+        trimmed_group = group_sorted.iloc[start_cut: group_len-end_cut]
+        trimmed_groups.append(trimmed_group)
+        total_removed_count += group_len - len(trimmed_group)
 
     if not trimmed_groups:
         print("警告: 前後除外の結果、有効な歩行周期が残りませんでした。")
         return pd.DataFrame()
 
-    # 有効なグループを結合
     df_trimmed = pd.concat(trimmed_groups).reset_index(drop=True)
-    print(
-        f"  前後除外処理完了。 {original_count} -> {len(df_trimmed)} イベント ({total_removed_count} イベント除外)")
+    print(f"  前後除外処理完了。 {original_count} -> {len(df_trimmed)} イベント ({total_removed_count} イベント除外)")
     return df_trimmed
 
 
@@ -199,6 +216,9 @@ class GaitAnalysisApp:
         self.trunk_ic_results = None         # 体幹IC検出結果(辞書)
         self.gait_events_shank_steady = None  # 下腿ベース最終イベント
         self.time_vector = None              # 時間ベクトル
+        # __init__ 内
+        self.time_vector = None
+        self.gait_events_trunk_steady = None   # ★追加：体幹ICの定常区間データ
 
         # --- GUI要素の作成 ---
         # トップフレーム (ファイル名、ステータス)
@@ -429,6 +449,8 @@ class GaitAnalysisApp:
         gait_events_df_shank_segmented = pd.DataFrame()
         gait_events_df_shank_steady = pd.DataFrame()
         ic_events_df_trunk = pd.DataFrame()
+        gait_events_df_trunk_segmented = pd.DataFrame() # ★追加★
+        gait_events_df_trunk_steady = pd.DataFrame() # ★追加★
 
         try:
             print("\n========================================")
@@ -522,13 +544,61 @@ class GaitAnalysisApp:
                             "filtered_ap_signal")
                         filtered_lr = self.trunk_ic_results.get(
                             "filtered_lr_gyro_signal")
-                        if filtered_ap is not None and filtered_lr is not None and self.time_vector is not None:
-                            self.plot_trunk_ics(
-                                ic_events_df_trunk, filtered_ap, filtered_lr, self.time_vector)
-                        else:
-                            print("警告: 体幹ICプロット用データ不足")
+                        # 体幹ICプロット（暫定グラフ, 灰色のみ）は削除
 
-            
+            gait_events_df_trunk_segmented = pd.DataFrame()
+            gait_events_df_trunk_steady = pd.DataFrame()
+
+            # ステップ 2.1: 歩行トライアル分割 (体幹ICベース)
+            if ic_events_df_trunk is not None and not ic_events_df_trunk.empty:
+                print("\n[ステップ2.1] 歩行トライアルの自動分割 (体幹ICベース) を実行中...")
+                gait_events_df_trunk_segmented = segment_walking_trials(
+                    events_df=ic_events_df_trunk,  # ★ 体幹ICデータを入力 ★
+                    max_interval_sec=MAX_IC_INTERVAL_SEC,
+                    min_ics_per_trial=MIN_ICS_PER_TRIAL
+                )
+                if not gait_events_df_shank_segmented.empty:
+                        print("\n[ステップ2.1.1] 分割後のIC/FOイベントをプロットします...")
+                        # filtered_signals_gyro は identify_gait_cycles から取得済み
+                        # time_vector も identify_gait_cycles から取得済み
+                        self.plot_gait_events(gait_events_df_shank_segmented, filtered_signals_gyro, self.time_vector)
+
+            # ステップ 2.2: トライアルの前後除外 (体幹ICベース)
+            if not gait_events_df_trunk_segmented.empty:
+                print("\n[ステップ2.2] 定常歩行部分の抽出（前後除外, 体幹ICベース）を実行中...")
+                gait_events_df_trunk_steady = trim_trial_ends(
+                    df_segmented=gait_events_df_trunk_segmented,  # ★ 分割後の体幹ICデータを入力 ★
+                    n_start=NUM_ICS_REMOVE_START,
+                    n_end=NUM_ICS_REMOVE_END
+                )
+            else:
+                print("  分割された体幹トライアルがないため、前後除外はスキップします。")
+
+            # ステップ 2.3: 定常歩行区間(体幹ICベース)のデータ保存と表示
+            if not gait_events_df_trunk_steady.empty:
+                output_gait_file_trunk_steady = OUTPUT_FOLDER / \
+                    (base_filename + "_trunk_events_steady.csv")  # 新しいファイル名
+                print(f"\n[ステップ2.3] 定常歩行区間(体幹IC)データを保存中...")
+                save_results(output_gait_file_trunk_steady,
+                             gait_events_df_trunk_steady, "定常歩行ICデータ(体幹)")
+                print("\n--- 抽出された定常歩行区間(体幹IC) (最初の5件) ---")
+                print(gait_events_df_trunk_steady[[
+                      'Leg', 'Trial_ID', 'Cycle', 'IC_Time']].head().to_string())  # FO列はない
+                print("------------------------------------------")
+                # --- プロット (体幹 AP/Yaw, 定常区間IC) をここで呼び出す ---
+                self.gait_events_trunk_steady = gait_events_df_trunk_steady  # インスタンスに保持
+                filtered_ap_global = self.trunk_ic_results.get("filtered_ap_signal")
+                filtered_lr_global = self.trunk_ic_results.get("filtered_lr_gyro_signal")
+                if filtered_ap_global is not None and filtered_lr_global is not None:
+                    self.plot_trunk_ics(
+                        ic_events_df_all=ic_events_df_trunk,
+                        ic_events_df_steady=self.gait_events_trunk_steady,
+                        filtered_ap_signal=filtered_ap_global,
+                        filtered_lr_gyro_signal=filtered_lr_global,
+                        time_vector=self.time_vector
+                    )
+            else:
+                print("\n[情報] 有効な定常歩行区間(体幹IC)が見つかりませんでした。")
 
             # === ステップ 2.1-3.1: 下腿ベースの解析 ===
             if gait_events_df_shank_all is not None and not gait_events_df_shank_all.empty:
@@ -682,27 +752,54 @@ class GaitAnalysisApp:
             # 結果のチェックとプロット
             if self.trunk_ic_results is not None and isinstance(self.trunk_ic_results, dict):
                 ic_events_df_trunk = self.trunk_ic_results.get("ic_events_df")
-                filtered_ap = self.trunk_ic_results.get("filtered_ap_signal")
-                filtered_lr = self.trunk_ic_results.get(
-                    "filtered_lr_gyro_signal")  # キー名修正
-                # time_vector は self.time_vector を使用
-
+                # --- 体幹ICが取得できた場合 ---
                 if ic_events_df_trunk is None or ic_events_df_trunk.empty:
                     print("体幹IC検出失敗(更新)")
                     messagebox.showwarning(
                         "IC同定(更新)", "指定パラメータでIC検出失敗", parent=self.master)
                 else:
-                    print(f"{len(ic_events_df_trunk)} 個のIC検出(更新)。プロット表示...")
-                    if filtered_ap is not None and filtered_lr is not None and self.time_vector is not None:
-                        # ★ プロット関数呼び出し ★
-                        self.plot_trunk_ics(
-                            ic_events_df_trunk, filtered_ap, filtered_lr, self.time_vector)
-                        # ★ 更新時にもCSV保存するなら追加 ★
-                        # base_filename = self.input_file_path.stem
-                        # output_trunk_ic = OUTPUT_FOLDER / (base_filename + OUTPUT_SUFFIX_GAIT_TRUNK_IC)
-                        # save_results(output_trunk_ic, ic_events_df_trunk, "体幹ICイベント(更新版)")
+                    print(f"{len(ic_events_df_trunk)} 個のIC検出(更新)。再セグメント & プロット...")
+
+                    # 1) 歩行トライアルを再セグメント
+                    gait_events_df_trunk_segmented = segment_walking_trials(
+                        events_df=ic_events_df_trunk,
+                        max_interval_sec=MAX_IC_INTERVAL_SEC,
+                        min_ics_per_trial=MIN_ICS_PER_TRIAL
+                    )
+
+                    # 2) 定常区間を再抽出
+                    if not gait_events_df_trunk_segmented.empty:
+                        gait_events_df_trunk_steady = trim_trial_ends(
+                            df_segmented=gait_events_df_trunk_segmented,
+                            n_start=NUM_ICS_REMOVE_START,
+                            n_end=NUM_ICS_REMOVE_END
+                        )
                     else:
-                        print("警告: 更新後の体幹ICプロット用データ不足")
+                        # Trial segmentation が無い場合でも 3歩・5歩カットを行う
+                        pseudo_df = ic_events_df_trunk.sort_values('IC_Index').copy()
+                        pseudo_df['Trial_ID'] = 1
+                        gait_events_df_trunk_steady = trim_trial_ends(
+                            df_segmented=pseudo_df,
+                            n_start=NUM_ICS_REMOVE_START,
+                            n_end=NUM_ICS_REMOVE_END
+                        )
+
+                    # 3) インスタンスに保持し、プロット
+                    self.gait_events_trunk_steady = gait_events_df_trunk_steady
+
+                    filtered_ap_signal = self.trunk_ic_results.get("filtered_ap_signal")
+                    filtered_lr_gyro_signal = self.trunk_ic_results.get("filtered_lr_gyro_signal")
+
+                    if filtered_ap_signal is not None and filtered_lr_gyro_signal is not None:
+                        self.plot_trunk_ics(
+                            ic_events_df_all=ic_events_df_trunk,
+                            ic_events_df_steady=self.gait_events_trunk_steady,
+                            filtered_ap_signal=filtered_ap_signal,
+                            filtered_lr_gyro_signal=filtered_lr_gyro_signal,
+                            time_vector=self.time_vector
+                        )
+                    else:
+                        print("  警告: プロット用信号が不足しています。")
             else:
                 print("エラー: 体幹IC検出関数から予期せぬ結果")
             self.status_label.config(text="体幹IC更新完了")
@@ -723,6 +820,26 @@ class GaitAnalysisApp:
             print("プロットするイベントデータなし")
             return
         try:
+            # --- derive global steady window (first IC to last IC) + padding ---
+            global_start_idx = None
+            global_end_idx   = None
+            if not gait_events_df.empty and 'IC_Time' in gait_events_df.columns:
+                global_start_time = gait_events_df['IC_Time'].min()
+                global_end_time   = gait_events_df['IC_Time'].max()
+                global_start_idx = np.searchsorted(time_vector, global_start_time, side='left')
+                global_end_idx   = np.searchsorted(time_vector, global_end_time, side='right') - 1
+                if global_start_idx < global_end_idx:
+                    dt = time_vector[1] - time_vector[0] if len(time_vector) > 1 else 0.01
+                    pad_samples = int(round(5.0 / dt))
+
+                    start_idx_pad = max(0, global_start_idx - pad_samples)
+                    end_idx_pad   = min(len(time_vector) - 1, global_end_idx + pad_samples)
+
+                    time_vector = time_vector[start_idx_pad: end_idx_pad + 1]
+                    for leg in filtered_signals.keys():
+                        sig = filtered_signals[leg]
+                        if sig is not None and len(sig) >= end_idx_pad + 1:
+                            filtered_signals[leg] = sig[start_idx_pad: end_idx_pad + 1]
             fig_events, axes = plt.subplots(2, 1, figsize=(14, 8), sharex=True)
             fig_events.suptitle(
                 f'検出歩行イベント(下腿GyroZ定常) - {self.input_file_path.name}')
@@ -742,6 +859,7 @@ class GaitAnalysisApp:
                 leg_events = gait_events_df[gait_events_df['Leg'] == leg]
                 ic_times = leg_events['IC_Time'].dropna().values
                 fo_times = leg_events['FO_Time'].dropna().values
+                # For plotting markers, derive indices with respect to trimmed time_vector directly
                 ic_indices_plot = np.searchsorted(
                     time_vector, ic_times, side='left')
                 fo_indices_plot = np.searchsorted(
@@ -777,87 +895,149 @@ class GaitAnalysisApp:
 
     # --- 体幹ICイベントプロット用メソッド ---
 
-    def plot_trunk_ics(self, ic_events_df, filtered_ap_signal, filtered_lr_gyro_signal, time_vector):
-        print("\n[ステップ2.4(暫定)] IC イベント (体幹Acc/Gyroベース) をグラフにプロットします...")
-        if ic_events_df is None or ic_events_df.empty:
-            print("プロットICなし")
-            return
-        if filtered_ap_signal is None or filtered_lr_gyro_signal is None or time_vector is None:
-            print("プロット用信号/時間ベクトルなし")
-            return
+    def plot_trunk_ics(self, ic_events_df_all, ic_events_df_steady, filtered_ap_signal, filtered_lr_gyro_signal, time_vector): # ★ 引数変更 ★
+        print("\n[ステップ2.4] IC イベント (体幹Acc/Gyroベース, 定常区間強調) をグラフにプロットします...") # メッセージ変更
+
+        # 入力データの基本的なチェック
+        if filtered_ap_signal is None or filtered_lr_gyro_signal is None or self.time_vector is None:
+            print("  プロット用の信号または時間ベクトルがありません。"); return
         if len(filtered_ap_signal) != len(time_vector) or len(filtered_lr_gyro_signal) != len(time_vector):
-            print("警告:信号/時間ベクトル長不整合")
-            return
+            print("  警告: プロット用の信号と時間ベクトルの長さが不整合です。"); return
+
         try:
-            fig_events, axes = plt.subplots(2, 1, figsize=(14, 8), sharex=True)
-            fig_events.suptitle(f'検出ICイベント(体幹) - {self.input_file_path.name}')
-            plot_successful = False
             signal_ap = filtered_ap_signal
             signal_lr = filtered_lr_gyro_signal
-            # 上段: AP Acc + IC Markers
+            # ----- compute steady walking intervals (start/end indices) -----
+            # ----- remove runs of ≥3 consecutive ICs from the same leg -----
+            if ic_events_df_steady is not None and not ic_events_df_steady.empty:
+                df_seq = ic_events_df_steady.sort_values('IC_Index').copy()
+                # 新しいグループ番号を同じ脚が切り替わるたびに付与
+                df_seq['seq_id'] = (df_seq['Leg'] != df_seq['Leg'].shift()).cumsum()
+                # 各シーケンスの長さを計算
+                seq_lengths = df_seq.groupby('seq_id')['Leg'].transform('size')
+                # 長さ3以上のシーケンスを除外
+                df_seq = df_seq[seq_lengths < 3]
+                # 変数を更新して以降のプロットに反映
+                ic_events_df_steady = df_seq
+            steady_intervals = []
+            if ic_events_df_steady is not None and not ic_events_df_steady.empty and 'IC_Index' in ic_events_df_steady.columns:
+                if 'Trial_ID' in ic_events_df_steady.columns:
+                    for _, grp in ic_events_df_steady.groupby('Trial_ID'):
+                        s_idx = int(grp['IC_Index'].min())
+                        e_idx = int(grp['IC_Index'].max())
+                        if 0 <= s_idx < len(time_vector) and 0 <= e_idx < len(time_vector):
+                            steady_intervals.append((s_idx, e_idx))
+                else:
+                    s_idx = int(ic_events_df_steady['IC_Index'].min())
+                    e_idx = int(ic_events_df_steady['IC_Index'].max())
+                    if 0 <= s_idx < len(time_vector) and 0 <= e_idx < len(time_vector):
+                        steady_intervals.append((s_idx, e_idx))
+            # ----- restrict plotting to overall steady interval (+/-5sec padding) -----
+            if steady_intervals:
+                global_start_idx = min(s for s, _ in steady_intervals)
+                global_end_idx   = max(e for _, e in steady_intervals)
+
+                # 5 秒分のパディングをサンプル数に変換
+                dt = time_vector[1] - time_vector[0] if len(time_vector) > 1 else 0.01
+                pad_samples = int(round(5.0 / dt))
+
+                start_idx_pad = max(0, global_start_idx - pad_samples)
+                end_idx_pad   = min(len(time_vector) - 1, global_end_idx + pad_samples)
+
+                # slice every series & time_vector
+                time_vector = time_vector[start_idx_pad: end_idx_pad + 1]
+                signal_ap   = signal_ap[start_idx_pad: end_idx_pad + 1]
+                signal_lr   = signal_lr[start_idx_pad: end_idx_pad + 1]
+
+                # rebase steady interval indices for shading
+                steady_intervals = [(s - start_idx_pad, e - start_idx_pad) for s, e in steady_intervals]
+
+                # --- ensure we don't resurrect the trimmed ICs ---
+                ic_events_df_steady = ic_events_df_steady[
+                    (ic_events_df_steady['IC_Index'] >= global_start_idx) &
+                    (ic_events_df_steady['IC_Index'] <= global_end_idx)
+                ]
+
+                #   >> recompute steady_intervals because the DataFrame was truncated
+                steady_intervals = []
+                if not ic_events_df_steady.empty:
+                    for _, grp in ic_events_df_steady.groupby('Trial_ID'):
+                        s_idx_new = int(grp['IC_Index'].min()) - start_idx_pad
+                        e_idx_new = int(grp['IC_Index'].max()) - start_idx_pad
+                        steady_intervals.append((s_idx_new, e_idx_new))
+            fig_events, axes = plt.subplots(2, 1, figsize=(14, 8), sharex=True)
+            fig_events.suptitle(f'検出された体幹ICと定常歩行区間IC - {self.input_file_path.name}')
+            plot_successful = False
+            # --- 上段: AP加速度とICマーカー ---
             ax_ap = axes[0]
-            ax_ap.plot(time_vector, signal_ap,
-                       label=f'Trunk AP Acc(Z,Filt,Offset)', alpha=0.7, color='k')
-            for leg, color, marker in [('L', 'blue', 'o'), ('R', 'red', 'o')]:
-                leg_events = ic_events_df[ic_events_df['Leg'] == leg]
-                if not leg_events.empty:
-                    ic_indices = leg_events['IC_Index'].dropna().astype(
-                        int).values
-                    valid_ic = ic_indices[(ic_indices >= 0) & (
-                        ic_indices < len(signal_ap))]
-                if len(valid_ic) > 0:
-                    ax_ap.plot(time_vector[valid_ic], signal_ap[valid_ic],
-                               marker=marker, color=color, ms=6, label=f'IC({leg})', ls='None')
-            unknown_events = ic_events_df[ic_events_df['Leg'] == 'Unknown']
-            if not unknown_events.empty:
-                unk_ic_indices = unknown_events['IC_Index'].dropna().astype(
-                    int).values
-                valid_unk_ic = unk_ic_indices[(unk_ic_indices >= 0) & (
-                    unk_ic_indices < len(signal_ap))]
-                if len(valid_unk_ic) > 0:
-                    ax_ap.plot(time_vector[valid_unk_ic], signal_ap[valid_unk_ic],
-                               marker='x', color='gray', ms=6, label=f'IC(Unknown)', ls='None')
-            ax_ap.set_title(f'体幹 AP(Z軸) Acc と検出IC')
-            ax_ap.set_ylabel('加速度(単位?)')
-            ax_ap.legend(loc='upper right')
-            ax_ap.grid(True)
-            plot_successful = True
-            # 下段: LR Gyro + IC Markers
+            ax_ap.plot(time_vector, signal_ap, label=f'Trunk AP Acc (Z, Filt, Offset)', alpha=0.7, color='k')
+            # highlight steady interval(s)
+            for s_idx, e_idx in steady_intervals:
+                ax_ap.axvspan(time_vector[s_idx], time_vector[e_idx],
+                              color='yellow', alpha=0.2, label='_nolegend_')
+
+            # 定常区間のICを目立つマーカーでプロット (左右色分け)
+            if ic_events_df_steady is not None and not ic_events_df_steady.empty:
+                for leg, color, marker in [('L', 'blue', 'o'), ('R', 'red', 'o')]:
+                    leg_events = ic_events_df_steady[ic_events_df_steady['Leg'] == leg]
+                    if not leg_events.empty:
+                        ic_indices = leg_events['IC_Index'].dropna().astype(int).values
+                        # rebased indices if slicing applied
+                        if steady_intervals:
+                            ic_indices = ic_indices - start_idx_pad
+                        valid_ic = ic_indices[(ic_indices >= 0) & (ic_indices < len(signal_ap))]
+                        if len(valid_ic) > 0: ax_ap.plot(time_vector[valid_ic], signal_ap[valid_ic], marker=marker, color=color, markersize=6, label=f'Steady IC ({leg})', linestyle='None')
+                unknown_events = ic_events_df_steady[ic_events_df_steady['Leg'] == 'Unknown']
+                if not unknown_events.empty:
+                    unk_ic_indices = unknown_events['IC_Index'].dropna().astype(int).values
+                    if steady_intervals:
+                        unk_ic_indices = unk_ic_indices - start_idx_pad
+                    valid_unk_ic = unk_ic_indices[(unk_ic_indices >= 0) & (unk_ic_indices < len(signal_ap))]
+                    if len(valid_unk_ic) > 0: ax_ap.plot(time_vector[valid_unk_ic], signal_ap[valid_unk_ic], marker='x', color='darkgray', markersize=6, label=f'Steady IC (Unknown)', linestyle='None')
+
+            # タイトル更新
+            ax_ap.set_title('体幹 AP(Z) 加速度 – 定常歩行区間 IC')
+            ax_ap.set_ylabel('加速度 (単位?)'); ax_ap.legend(loc='upper right'); ax_ap.grid(True); plot_successful = True
+
+            # --- 下段: Yaw角速度とICマーカー ---
             ax_lr = axes[1]
-            ax_lr.plot(time_vector, signal_lr,
-                       label=f'Trunk Yaw Gyro(Y,Filtered)', alpha=0.7, color='k')
-            ax_lr.axhline(0, color='gray', ls='--', lw=0.5)
-            for leg, color, marker in [('L', 'blue', 'o'), ('R', 'red', 'o')]:
-                leg_events = ic_events_df[ic_events_df['Leg'] == leg]
-                if not leg_events.empty:
-                    ic_indices = leg_events['IC_Index'].dropna().astype(
-                        int).values
-                    valid_ic = ic_indices[(ic_indices >= 0) & (
-                        ic_indices < len(signal_lr))]
-                if len(valid_ic) > 0:
-                    ax_lr.plot(time_vector[valid_ic], signal_lr[valid_ic],
-                               marker=marker, color=color, ms=6, label=f'IC({leg})', ls='None')
-            if not unknown_events.empty:
-                unk_ic_indices = unknown_events['IC_Index'].dropna().astype(
-                    int).values
-                valid_unk_ic = unk_ic_indices[(unk_ic_indices >= 0) & (
-                    unk_ic_indices < len(signal_lr))]
-                if len(valid_unk_ic) > 0:
-                    ax_lr.plot(time_vector[valid_unk_ic], signal_lr[valid_unk_ic],
-                           marker='x', color='gray', ms=6, label=f'IC(Unknown)', ls='None')
-            ax_lr.set_title(f'体幹 Yaw(Y軸) Gyro と検出IC (LR判定用)')
-            ax_lr.set_ylabel('角速度(単位?)')
-            ax_lr.legend(loc='upper right')
-            ax_lr.grid(True)
+            ax_lr.plot(time_vector, signal_lr, label=f'Trunk Yaw Gyro (Y, Filtered)', alpha=0.7, color='k')
+            ax_lr.axhline(0, color='gray', linestyle='--', linewidth=0.5)
+            # highlight steady interval(s)
+            for s_idx, e_idx in steady_intervals:
+                ax_lr.axvspan(time_vector[s_idx], time_vector[e_idx],
+                              color='yellow', alpha=0.2, label='_nolegend_')
+
+            # 定常区間のICを目立つマーカーでプロット (左右色分け)
+            if ic_events_df_steady is not None and not ic_events_df_steady.empty:
+                for leg, color, marker in [('L', 'blue', 'o'), ('R', 'red', 'o')]:
+                    leg_events = ic_events_df_steady[ic_events_df_steady['Leg'] == leg]
+                    if not leg_events.empty:
+                        ic_indices = leg_events['IC_Index'].dropna().astype(int).values
+                        if steady_intervals:
+                            ic_indices = ic_indices - start_idx_pad
+                        valid_ic = ic_indices[(ic_indices >= 0) & (ic_indices < len(signal_lr))]
+                        if len(valid_ic) > 0: ax_lr.plot(time_vector[valid_ic], signal_lr[valid_ic], marker=marker, color=color, markersize=6, label=f'Steady IC ({leg})', linestyle='None')
+                unknown_events = ic_events_df_steady[ic_events_df_steady['Leg'] == 'Unknown']
+                if not unknown_events.empty:
+                    unk_ic_indices = unknown_events['IC_Index'].dropna().astype(int).values
+                    if steady_intervals:
+                        unk_ic_indices = unk_ic_indices - start_idx_pad
+                    valid_unk_ic = unk_ic_indices[(unk_ic_indices >= 0) & (unk_ic_indices < len(signal_lr))]
+                    if len(valid_unk_ic) > 0: ax_lr.plot(time_vector[valid_unk_ic], signal_lr[valid_unk_ic], marker='x', color='darkgray', markersize=6, label=f'Steady IC (Unknown)', linestyle='None')
+
+            # タイトル更新
+            ax_lr.set_title('体幹 Yaw(Y) 角速度 – 定常歩行区間 IC')
+            ax_lr.set_ylabel('角速度 (単位?)'); ax_lr.legend(loc='upper right'); ax_lr.grid(True)
+
+            # プロット表示
             if plot_successful:
-                ax_lr.set_xlabel('時間(s)')
-                plt.tight_layout(rect=[0, 0.03, 1, 0.95])
-                plt.show(block=False)
-            else:
-                plt.close(fig_events)
-                print("ICプロット不可")
+                ax_lr.set_xlabel('時間 (s)'); plt.tight_layout(rect=[0, 0.03, 1, 0.95]); plt.show(block=False)
+            else: plt.close(fig_events); print("ICプロット不可")
         except Exception as e:
-            print(f"エラー:ICプロット中:{e}")  # ... close fig ...
+            print(f"  エラー: ICイベントプロット中にエラー: {e}")
+            if 'fig_events' in locals() and isinstance(fig_events, plt.Figure) and plt.fignum_exists(fig_events.number):
+                plt.close(fig_events)
 
     # --- 同期済み角速度の最終プロット用メソッド ---
 
