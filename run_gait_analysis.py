@@ -2,6 +2,7 @@
 
 # --- 各機能ファイルをインポート ---
 # GUIおよびMatplotlib関連
+from scipy.signal import find_peaks
 from symmetry_indices import calculate_symmetry_index
 from kinematic_parameters import calculate_kinematic_params
 from temporal_parameters import calculate_temporal_params
@@ -22,7 +23,7 @@ import matplotlib
 matplotlib.use('TkAgg')  # Tkinter連携用バックエンドを明示的に指定
 
 # --- Stumble detection utility ---
-from scipy.signal import find_peaks
+
 
 def detect_stumble(time_vector, signal_lr, neg_thresh=-30, pos_thresh=70, window_sec=0.3):
     """
@@ -46,6 +47,7 @@ def detect_stumble(time_vector, signal_lr, neg_thresh=-30, pos_thresh=70, window
 # データ処理・数値計算関連
 
 # 自作モジュール
+
 
 # --- 日本語フォント設定 (japanize-matplotlib推奨) ---
 try:
@@ -92,7 +94,7 @@ TRUNK_IC_PEAK_HEIGHT = 0.1
 TRUNK_IC_PEAK_PROMINENCE = 0.1
 TRUNK_IC_PEAK_DISTANCE_MS = 200
 MIN_STEP_TIME_SEC = 0.3
-TRUNK_LR_GYRO_THRESHOLD = 5.0  # Gyro Y 左右判定閾値
+TRUNK_LR_GYRO_THRESHOLD = 12.5  # Gyro Y 左右判定閾値
 
 # 下腿IC/FO検出用パラメータ (identify_gait_cyclesのデフォルト値を使用)
 SHANK_SWING_THRESHOLD = 100  # 下腿GyroZ用
@@ -100,9 +102,14 @@ SHANK_SWING_THRESHOLD = 100  # 下腿GyroZ用
 MAX_IC_INTERVAL_SEC = 0.8  # IC間隔上限を0.8秒に設定（大きめのギャップでセグメント分割）
 MIN_ICS_PER_TRIAL = 15
 
-# 定常歩行抽出用パラメータ
+
+# 下腿ベース定常歩行抽出用パラメータ (先頭3歩・末尾5歩)
 NUM_ICS_REMOVE_START = 3
 NUM_ICS_REMOVE_END = 5
+
+# 体幹ベース定常歩行抽出用パラメータ (先頭5歩・末尾8歩)
+TRUNK_NUM_ICS_REMOVE_START = 5
+TRUNK_NUM_ICS_REMOVE_END = 8
 
 
 # --- 列名定義関数 ---
@@ -207,7 +214,8 @@ def trim_trial_ends(df_segmented, n_start=3, n_end=5):
         return pd.DataFrame()
 
     df_out = pd.concat(trimmed_trials).reset_index(drop=True)
-    print(f"  前後除外処理完了。 {original_count} -> {len(df_out)} イベント削除数: {total_removed}")
+    print(
+        f"  前後除外処理完了。 {original_count} -> {len(df_out)} イベント削除数: {total_removed}")
     return df_out
 
 
@@ -532,6 +540,39 @@ class GaitAnalysisApp:
                         print("  体幹IC検出失敗")
                     else:
                         print(f"  {len(ic_events_df_trunk)} 個の体幹IC検出")
+                        # --- ステップ2bis.2: 体幹ICを基に歩行区間を分割 (IC_Time間隔 ≥ 2秒) ---
+                        print("\n[ステップ2bis.2] 体幹ICを基に歩行区間分割 (IC_Time間隔 ≥2秒)")
+                        trunk_segmented = segment_walking_trials(
+                            events_df=ic_events_df_trunk,
+                            max_interval_sec=0.7,      # 2秒以上空いたら別セグメント
+                            min_ics_per_trial=1        # 最低1ICを残す
+                        )
+                        if trunk_segmented is None or trunk_segmented.empty:
+                            print("  体幹ICに基づく歩行区間分割結果なし")
+                        else:
+                            # 各 Trial_ID ごとの IC 個数を数えて、16 以下のグループを削除
+                            before_cnt = len(trunk_segmented)
+                            trunk_filtered = trunk_segmented.groupby('Trial_ID') \
+                                                            .filter(lambda g: len(g) > 16)
+                            removed = before_cnt - len(trunk_filtered)
+                            print(
+                                f"  小セグメント(≤16 IC)を {removed} イベント分除去 → 残り {len(trunk_filtered)} イベント")
+
+                            # 以降の処理に使う DataFrame を差し替え
+                            ic_events_df_trunk = trunk_filtered
+                            n_seg = ic_events_df_trunk['Trial_ID'].nunique()
+                            print(f"  → {n_seg} 個の体幹歩行セグメントが残っています")
+                            # --- 各セグメントの先頭5歩・末尾8歩を除外して定常歩行区間を抽出 ---
+                            ic_before = len(ic_events_df_trunk)
+                            ic_events_df_trunk = trim_trial_ends(
+                                df_segmented=ic_events_df_trunk,
+                                n_start=TRUNK_NUM_ICS_REMOVE_START,
+                                n_end=TRUNK_NUM_ICS_REMOVE_END
+                            )
+                            removed_ic = ic_before - len(ic_events_df_trunk)
+                            print(
+                                f"  定常歩行区間抽出: {removed_ic} 件除去 → 残り {len(ic_events_df_trunk)} 件")
+
                         output_gait_file_trunk_ic = OUTPUT_FOLDER / \
                             (base_filename + OUTPUT_SUFFIX_GAIT_TRUNK_IC)
                         print(f"\n[ステップ2bis.1] 体幹ICイベントデータ保存中...")
@@ -548,29 +589,14 @@ class GaitAnalysisApp:
                             "filtered_lr_gyro_signal")
                         # preserve originals for shank later
                         orig_time_vector = self.time_vector
-                        orig_filtered_ap  = filtered_ap
-                        orig_filtered_lr  = filtered_lr
+                        orig_filtered_ap = filtered_ap
+                        orig_filtered_lr = filtered_lr
 
                         # use locals for trunk truncation
                         tv_trunk = orig_time_vector
                         fa_trunk = orig_filtered_ap
                         fl_trunk = orig_filtered_lr
 
-                        # --- stumble detection and truncate before initial trunk plot ---
-                        stumble_time = detect_stumble(orig_time_vector, orig_filtered_lr,
-                                                      neg_thresh=-30, pos_thresh=70, window_sec=0.3)
-                        if stumble_time is not None:
-                            cut_idx = np.searchsorted(orig_time_vector, stumble_time, side='left')
-                            # truncate trunk data only
-                            tv_trunk = orig_time_vector[:cut_idx]
-                            fa_trunk = orig_filtered_ap[:cut_idx]
-                            fl_trunk = orig_filtered_lr[:cut_idx]
-                            # remove IC and FO events after stumble
-                            if 'IC_Time' in ic_events_df_trunk.columns:
-                                ic_events_df_trunk = ic_events_df_trunk[ic_events_df_trunk['IC_Time'] < stumble_time]
-                            if 'FO_Time' in ic_events_df_trunk.columns:
-                                ic_events_df_trunk = ic_events_df_trunk[ic_events_df_trunk['FO_Time'] < stumble_time]
-                            print(f"[Stumble] Initial plot truncated at {stumble_time:.2f}s → remaining events: {len(ic_events_df_trunk)}")
                         if fa_trunk is not None and fl_trunk is not None and tv_trunk is not None:
                             self.plot_trunk_ics(
                                 ic_events_df_trunk,
@@ -578,8 +604,6 @@ class GaitAnalysisApp:
                             )
                         else:
                             print("警告: 体幹ICプロット用データ不足")
-
-            
 
             # === ステップ 2.1-3.1: 下腿ベースの解析 ===
             if gait_events_df_shank_all is not None and not gait_events_df_shank_all.empty:
@@ -591,17 +615,23 @@ class GaitAnalysisApp:
                 for trial_id, trial_grp in gait_events_df_shank_segmented.groupby('Trial_ID'):
                     # define time window for this trial
                     start_time = trial_grp['IC_Time'].min()
-                    end_time   = trial_grp['IC_Time'].max()
+                    end_time = trial_grp['IC_Time'].max()
                     # convert to sample indices on the global time_vector
-                    idx_start = np.searchsorted(self.time_vector, start_time, side='left')
-                    idx_end   = np.searchsorted(self.time_vector, end_time,   side='right')
+                    idx_start = np.searchsorted(
+                        self.time_vector, start_time, side='left')
+                    idx_end = np.searchsorted(
+                        self.time_vector, end_time,   side='right')
                     # slice signals for this trial
                     tv_trial = self.time_vector[idx_start:idx_end]
-                    sig_L    = filtered_signals_gyro.get('L', np.array([]))[idx_start:idx_end]
-                    sig_R    = filtered_signals_gyro.get('R', np.array([]))[idx_start:idx_end]
+                    sig_L = filtered_signals_gyro.get('L', np.array([]))[
+                        idx_start:idx_end]
+                    sig_R = filtered_signals_gyro.get('R', np.array([]))[
+                        idx_start:idx_end]
                     # detect stumble per leg within trial window
-                    t_L = detect_stumble(tv_trial, sig_L, neg_thresh=-30, pos_thresh=70, window_sec=0.3)
-                    t_R = detect_stumble(tv_trial, sig_R, neg_thresh=-30, pos_thresh=70, window_sec=0.3)
+                    t_L = detect_stumble(
+                        tv_trial, sig_L, neg_thresh=-30, pos_thresh=70, window_sec=0.3)
+                    t_R = detect_stumble(
+                        tv_trial, sig_R, neg_thresh=-30, pos_thresh=70, window_sec=0.3)
                     # pick earliest stumble time if any
                     t_cand = [t for t in (t_L, t_R) if t is not None]
                     if t_cand:
@@ -611,15 +641,19 @@ class GaitAnalysisApp:
                         if len(pre_ic) >= 3:
                             # filter out events after stumble
                             trial_grp = trial_grp[pre_ic.index]
-                            trial_grp = trial_grp[trial_grp['IC_Time'] < t_stumble]
+                            trial_grp = trial_grp[trial_grp['IC_Time']
+                                                  < t_stumble]
                             if 'FO_Time' in trial_grp.columns:
-                                trial_grp = trial_grp[trial_grp['FO_Time'] < t_stumble]
+                                trial_grp = trial_grp[trial_grp['FO_Time']
+                                                      < t_stumble]
                         else:
                             # do not truncate this trial (stumble too early, likely noise)
                             pass
                     cleaned_segments.append(trial_grp)
-                gait_events_df_shank_segmented = pd.concat(cleaned_segments).reset_index(drop=True)
-                print(f"  [Shank] Per-trial stumble truncation applied, remaining events: {len(gait_events_df_shank_segmented)}")
+                gait_events_df_shank_segmented = pd.concat(
+                    cleaned_segments).reset_index(drop=True)
+                print(
+                    f"  [Shank] Per-trial stumble truncation applied, remaining events: {len(gait_events_df_shank_segmented)}")
                 if not gait_events_df_shank_segmented.empty:
                     print("\n[ステップ2.2] 定常歩行部分の抽出（前後除外, 下腿ベース）を実行中...")
                     gait_events_df_shank_steady = trim_trial_ends(
@@ -768,21 +802,24 @@ class GaitAnalysisApp:
             if self.trunk_ic_results is not None and isinstance(self.trunk_ic_results, dict):
                 ic_events_df_trunk = self.trunk_ic_results.get("ic_events_df")
                 filtered_ap = self.trunk_ic_results.get("filtered_ap_signal")
-                filtered_lr = self.trunk_ic_results.get("filtered_lr_gyro_signal")
+                filtered_lr = self.trunk_ic_results.get(
+                    "filtered_lr_gyro_signal")
                 # time_vector は self.time_vector を使用
 
                 # --- stumble detection and cut everything after ---
                 stumble_time = detect_stumble(self.time_vector, filtered_lr,
                                               neg_thresh=-30, pos_thresh=70, window_sec=0.3)
                 if stumble_time is not None:
-                    cut_idx = np.searchsorted(self.time_vector, stumble_time, side='left')
+                    cut_idx = np.searchsorted(
+                        self.time_vector, stumble_time, side='left')
                     # truncate time and signals
                     self.time_vector = self.time_vector[:cut_idx]
                     filtered_ap = filtered_ap[:cut_idx]
                     filtered_lr = filtered_lr[:cut_idx]
                     # remove IC events after stumble
                     ic_events_df_trunk = ic_events_df_trunk[ic_events_df_trunk['IC_Time'] < stumble_time]
-                    print(f"[Stumble] Detected at {stumble_time:.2f}s → remaining IC: {len(ic_events_df_trunk)}")
+                    print(
+                        f"[Stumble] Detected at {stumble_time:.2f}s → remaining IC: {len(ic_events_df_trunk)}")
 
                 if ic_events_df_trunk is None or ic_events_df_trunk.empty:
                     print("体幹IC検出失敗(更新)")
@@ -878,6 +915,11 @@ class GaitAnalysisApp:
     # --- 体幹ICイベントプロット用メソッド ---
 
     def plot_trunk_ics(self, ic_events_df, filtered_ap_signal, filtered_lr_gyro_signal, time_vector):
+        print("[DEBUG] plot_trunk_ics 入力確認 →",
+              "IC events rows:", len(ic_events_df),
+              "signal_ap len:", len(filtered_ap_signal),
+              "time_vector len:", len(time_vector))
+
         print("\n[ステップ2.4(暫定)] IC イベント (体幹Acc/Gyroベース) をグラフにプロットします...")
         if ic_events_df is None or ic_events_df.empty:
             print("プロットICなし")
@@ -897,28 +939,26 @@ class GaitAnalysisApp:
             # 上段: AP Acc + IC Markers
             ax_ap = axes[0]
             ax_ap.plot(time_vector, signal_ap,
-                       label=f'Trunk AP Acc(Z,Filt,Offset)', alpha=0.7, color='k')
+                       label='Trunk AP Acc (Filtered)', alpha=0.7, color='k')
+            # plot IC markers at detected IC_Time
             for leg, color, marker in [('L', 'blue', 'o'), ('R', 'red', 'o')]:
                 leg_events = ic_events_df[ic_events_df['Leg'] == leg]
-                if not leg_events.empty:
-                    ic_indices = leg_events['IC_Index'].dropna().astype(
-                        int).values
-                    valid_ic = ic_indices[(ic_indices >= 0) & (
-                        ic_indices < len(signal_ap))]
-                if len(valid_ic) > 0:
-                    ax_ap.plot(time_vector[valid_ic], signal_ap[valid_ic],
-                               marker=marker, color=color, ms=6, label=f'IC({leg})', ls='None')
-            unknown_events = ic_events_df[ic_events_df['Leg'] == 'Unknown']
-            if not unknown_events.empty:
-                unk_ic_indices = unknown_events['IC_Index'].dropna().astype(
-                    int).values
-                valid_unk_ic = unk_ic_indices[(unk_ic_indices >= 0) & (
-                    unk_ic_indices < len(signal_ap))]
-                if len(valid_unk_ic) > 0:
-                    ax_ap.plot(time_vector[valid_unk_ic], signal_ap[valid_unk_ic],
-                               marker='x', color='gray', ms=6, label=f'IC(Unknown)', ls='None')
-            ax_ap.set_title(f'体幹 AP(Z軸) Acc と検出IC')
-            ax_ap.set_ylabel('加速度(単位?)')
+                ic_times = leg_events['IC_Time'].dropna().values
+                ic_idx = np.searchsorted(time_vector, ic_times, side='left')
+                valid = ic_idx[(ic_idx >= 0) & (ic_idx < len(signal_ap))]
+                if len(valid) > 0:
+                    ax_ap.plot(time_vector[valid], signal_ap[valid],
+                               linestyle='None', marker=marker, color=color, ms=6, label=f'IC({leg})')
+            # unknown leg
+            unk_times = ic_events_df[ic_events_df['Leg']
+                                     == 'Unknown']['IC_Time'].dropna().values
+            unk_idx = np.searchsorted(time_vector, unk_times, side='left')
+            valid_unk = unk_idx[(unk_idx >= 0) & (unk_idx < len(signal_ap))]
+            if len(valid_unk) > 0:
+                ax_ap.plot(time_vector[valid_unk], signal_ap[valid_unk],
+                           linestyle='None', marker='x', color='gray', ms=6, label='IC(Unknown)')
+            ax_ap.set_title('体幹 AP(Z) 加速度 – 検出IC位置')
+            ax_ap.set_ylabel('加速度 (units)')
             ax_ap.legend(loc='upper right')
             ax_ap.grid(True)
             plot_successful = True
@@ -929,23 +969,21 @@ class GaitAnalysisApp:
             ax_lr.axhline(0, color='gray', ls='--', lw=0.5)
             for leg, color, marker in [('L', 'blue', 'o'), ('R', 'red', 'o')]:
                 leg_events = ic_events_df[ic_events_df['Leg'] == leg]
-                if not leg_events.empty:
-                    ic_indices = leg_events['IC_Index'].dropna().astype(
-                        int).values
-                    valid_ic = ic_indices[(ic_indices >= 0) & (
-                        ic_indices < len(signal_lr))]
-                if len(valid_ic) > 0:
-                    ax_lr.plot(time_vector[valid_ic], signal_lr[valid_ic],
-                               marker=marker, color=color, ms=6, label=f'IC({leg})', ls='None')
-            if not unknown_events.empty:
-                unk_ic_indices = unknown_events['IC_Index'].dropna().astype(
-                    int).values
-                valid_unk_ic = unk_ic_indices[(unk_ic_indices >= 0) & (
-                    unk_ic_indices < len(signal_lr))]
-                if len(valid_unk_ic) > 0:
-                    ax_lr.plot(time_vector[valid_unk_ic], signal_lr[valid_unk_ic],
-                           marker='x', color='gray', ms=6, label=f'IC(Unknown)', ls='None')
-            ax_lr.set_title(f'体幹 Yaw(Y軸) Gyro と検出IC (LR判定用)')
+                ic_times = leg_events['IC_Time'].dropna().values
+                ic_idx = np.searchsorted(time_vector, ic_times, side='left')
+                valid = ic_idx[(ic_idx >= 0) & (ic_idx < len(signal_lr))]
+                if len(valid) > 0:
+                    ax_lr.plot(time_vector[valid], signal_lr[valid],
+                               linestyle='None', marker=marker, color=color, ms=6, label=f'IC({leg})')
+            # unknown leg
+            unk_times = ic_events_df[ic_events_df['Leg']
+                                     == 'Unknown']['IC_Time'].dropna().values
+            unk_idx = np.searchsorted(time_vector, unk_times, side='left')
+            valid_unk = unk_idx[(unk_idx >= 0) & (unk_idx < len(signal_lr))]
+            if len(valid_unk) > 0:
+                ax_lr.plot(time_vector[valid_unk], signal_lr[valid_unk],
+                           linestyle='None', marker='x', color='gray', ms=6, label='IC(Unknown)')
+            ax_lr.set_title('体幹 Yaw(Y軸) Gyro と検出IC (LR判定用)')
             ax_lr.set_ylabel('角速度(単位?)')
             ax_lr.legend(loc='upper right')
             ax_lr.grid(True)
