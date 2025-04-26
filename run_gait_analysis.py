@@ -1,8 +1,10 @@
 # run_gait_analysis.py
 
 # --- 各機能ファイルをインポート ---
-# GUIおよびMatplotlib関連
 from scipy.signal import find_peaks
+from scipy.signal import butter, filtfilt
+from harmonic_ratio import calculate_harmonic_ratio
+from harmonic_ratio import calculate_integrated_harmonic_ratio
 from symmetry_indices import calculate_symmetry_index
 from kinematic_parameters import calculate_kinematic_params
 from temporal_parameters import calculate_temporal_params
@@ -597,6 +599,69 @@ class GaitAnalysisApp:
                         fa_trunk = orig_filtered_ap
                         fl_trunk = orig_filtered_lr
 
+                        # --- トランクVT加速度のバンドパスフィルタリング (0.1–20Hz) ---
+                        vt_raw = self.sync_data_df[f'{TRUNK_PREFIX}_Acc_Y_aligned'].values
+                        b, a = butter(4, [0.1, 20], btype='band', fs=self.sampling_rate)
+                        filtered_vt = filtfilt(b, a, vt_raw)
+                        # --- トランクML加速度のバンドパスフィルタリング (0.1–20Hz) ---
+                        ml_raw = self.sync_data_df[f'{TRUNK_PREFIX}_Acc_X_aligned'].values
+                        filtered_ml = filtfilt(b, a, ml_raw)
+
+                        # --- ステップ2bis.3: Trunk Harmonic Ratio (AP/VT/ML) の計算 ---
+                        print("\n[ステップ2bis.3] Trunk Harmonic Ratio (AP/VT/ML) の計算中...")
+                        hr_list_ap, hr_list_vt, hr_list_ml = [], [], []
+                        for trial_id, grp in ic_events_df_trunk.groupby('Trial_ID', sort=False):
+                            times = grp.sort_values('IC_Time')['IC_Time'].values
+                            for i in range(len(times) - 1):
+                                t0, t1 = times[i], times[i+1]
+                                idx0 = np.searchsorted(self.time_vector, t0, side='left')
+                                idx1 = np.searchsorted(self.time_vector, t1, side='left')
+                                seg_ap = fa_trunk[idx0:idx1]
+                                seg_vt = filtered_vt[idx0:idx1]
+                                seg_ml = filtered_ml[idx0:idx1]
+                                hr_ap = calculate_harmonic_ratio(seg_ap, self.sampling_rate, axis='AP')
+                                hr_vt = calculate_harmonic_ratio(seg_vt, self.sampling_rate, axis='VT')
+                                hr_ml = calculate_harmonic_ratio(seg_ml, self.sampling_rate, axis='ML')
+                                hr_list_ap.append(hr_ap)
+                                hr_list_vt.append(hr_vt)
+                                hr_list_ml.append(hr_ml)
+                        mean_hr_ap = float(np.nanmean(hr_list_ap)) if hr_list_ap else np.nan
+                        mean_hr_vt = float(np.nanmean(hr_list_vt)) if hr_list_vt else np.nan
+                        mean_hr_ml = float(np.nanmean(hr_list_ml)) if hr_list_ml else np.nan
+
+                        # Calculate integrated HR (iHR) per cycle
+                        ihr_list_ap, ihr_list_vt, ihr_list_ml = [], [], []
+                        for trial_id, grp in ic_events_df_trunk.groupby('Trial_ID', sort=False):
+                            times = grp.sort_values('IC_Time')['IC_Time'].values
+                            for i in range(len(times) - 1):
+                                t0, t1 = times[i], times[i+1]
+                                idx0 = np.searchsorted(self.time_vector, t0, side='left')
+                                idx1 = np.searchsorted(self.time_vector, t1, side='left')
+                                seg_ap = fa_trunk[idx0:idx1]
+                                seg_vt = filtered_vt[idx0:idx1]
+                                seg_ml = filtered_ml[idx0:idx1]
+                                ihr_ap = calculate_integrated_harmonic_ratio(seg_ap, self.sampling_rate, axis='AP')
+                                ihr_vt = calculate_integrated_harmonic_ratio(seg_vt, self.sampling_rate, axis='VT')
+                                ihr_ml = calculate_integrated_harmonic_ratio(seg_ml, self.sampling_rate, axis='ML')
+                                ihr_list_ap.append(ihr_ap)
+                                ihr_list_vt.append(ihr_vt)
+                                ihr_list_ml.append(ihr_ml)
+                        mean_ihr_ap = float(np.nanmean(ihr_list_ap)) if ihr_list_ap else np.nan
+                        mean_ihr_vt = float(np.nanmean(ihr_list_vt)) if ihr_list_vt else np.nan
+                        mean_ihr_ml = float(np.nanmean(ihr_list_ml)) if ihr_list_ml else np.nan
+                        print(f"  → iHR_AP: {mean_ihr_ap:.2f}%, iHR_VT: {mean_ihr_vt:.2f}%, iHR_ML: {mean_ihr_ml:.2f}%")
+
+                        print(f"  → HR_AP: {mean_hr_ap:.3f}, HR_VT: {mean_hr_vt:.3f}, HR_ML: {mean_hr_ml:.3f}")
+                        print(f"[STEP 2bis.3] Final Harmonic Ratios - AP: {mean_hr_ap:.3f}, VT: {mean_hr_vt:.3f}, ML: {mean_hr_ml:.3f}")
+                        # 結果辞書に追加
+                        results_all = {}
+                        results_all['HR_AP'] = mean_hr_ap
+                        results_all['HR_VT'] = mean_hr_vt
+                        results_all['HR_ML'] = mean_hr_ml
+                        results_all['iHR_AP'] = mean_ihr_ap
+                        results_all['iHR_VT'] = mean_ihr_vt
+                        results_all['iHR_ML'] = mean_ihr_ml
+
                         if fa_trunk is not None and fl_trunk is not None and tv_trunk is not None:
                             self.plot_trunk_ics(
                                 ic_events_df_trunk,
@@ -708,6 +773,14 @@ class GaitAnalysisApp:
                                 print(f"  {key}: {value:.3f}" if isinstance(
                                     value, (float, np.floating)) else f"  {key}: {value}")
                             print("--------------------")
+                            # Trunk Harmonic Ratios (from earlier computation)
+                            print(f"  HR_AP: {mean_hr_ap:.3f}, HR_VT: {mean_hr_vt:.3f}, HR_ML: {mean_hr_ml:.3f}")
+                            # Integrated Harmonic Ratios (iHR)
+                            print(f"  iHR_AP: {mean_ihr_ap:.2f}%, iHR_VT: {mean_ihr_vt:.2f}%, iHR_ML: {mean_ihr_ml:.2f}%")
+                            # Add iHRs to results_all for CSV
+                            results_all['iHR_AP'] = mean_ihr_ap
+                            results_all['iHR_VT'] = mean_ihr_vt
+                            results_all['iHR_ML'] = mean_ihr_ml
                             output_all_params_file = OUTPUT_FOLDER / \
                                 (base_filename + OUTPUT_ALL_PARAMS_FILE)
                             print(f"\n[ステップ3.1] 全パラメータ(下腿ベース)保存中...")
