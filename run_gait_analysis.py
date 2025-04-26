@@ -495,7 +495,12 @@ class GaitAnalysisApp:
             lag_T_R = lags_info.get('T_vs_R', 'N/A')
             result_message = f"前処理完了。\nLag (R基準, {SYNC_SIGNAL_SUFFIX}ピーク): L={lag_L_R}, T={lag_T_R} [samples]"
             print(f"\n[成功] {result_message}")
-            base_filename = self.input_file_path.stem
+            full_stem = self.input_file_path.stem             # 例: 1_1y_doppo
+            identifier = full_stem.rsplit('_', 1)[0]          # → 1_1y
+
+# 識別子付きフォルダ名を生成（存在しなければ作成）
+            output_folder = Path(f'./analysis_results_{identifier}')
+            output_folder.mkdir(parents=True, exist_ok=True)
             output_sync_file = OUTPUT_FOLDER / \
                 (base_filename + OUTPUT_SUFFIX_SYNC)
             print(f"\n[ステップ1.1] 同期済み全IMUデータ保存中...")
