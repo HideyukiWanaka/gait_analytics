@@ -653,14 +653,6 @@ class GaitAnalysisApp:
 
                         print(f"  → HR_AP: {mean_hr_ap:.3f}, HR_VT: {mean_hr_vt:.3f}, HR_ML: {mean_hr_ml:.3f}")
                         print(f"[STEP 2bis.3] Final Harmonic Ratios - AP: {mean_hr_ap:.3f}, VT: {mean_hr_vt:.3f}, ML: {mean_hr_ml:.3f}")
-                        # 結果辞書に追加
-                        results_all = {}
-                        results_all['HR_AP'] = mean_hr_ap
-                        results_all['HR_VT'] = mean_hr_vt
-                        results_all['HR_ML'] = mean_hr_ml
-                        results_all['iHR_AP'] = mean_ihr_ap
-                        results_all['iHR_VT'] = mean_ihr_vt
-                        results_all['iHR_ML'] = mean_ihr_ml
 
                         if fa_trunk is not None and fl_trunk is not None and tv_trunk is not None:
                             self.plot_trunk_ics(
@@ -778,6 +770,9 @@ class GaitAnalysisApp:
                             # Integrated Harmonic Ratios (iHR)
                             print(f"  iHR_AP: {mean_ihr_ap:.2f}%, iHR_VT: {mean_ihr_vt:.2f}%, iHR_ML: {mean_ihr_ml:.2f}%")
                             # Add iHRs to results_all for CSV
+                            results_all['HR_AP']  = mean_hr_ap
+                            results_all['HR_VT']  = mean_hr_vt
+                            results_all['HR_ML']  = mean_hr_ml
                             results_all['iHR_AP'] = mean_ihr_ap
                             results_all['iHR_VT'] = mean_ihr_vt
                             results_all['iHR_ML'] = mean_ihr_ml

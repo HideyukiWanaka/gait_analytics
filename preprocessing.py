@@ -5,6 +5,8 @@ from scipy.signal import find_peaks
 from pathlib import Path
 
 # 列名リストを返すヘルパー関数
+
+
 def get_expected_column_names(right_prefix, left_prefix, trunk_prefix):
     """期待される33列の列名リストを生成する"""
     return [
@@ -19,6 +21,8 @@ def get_expected_column_names(right_prefix, left_prefix, trunk_prefix):
     ]
 
 # 関数名を preprocess_and_sync_imu_data に変更 (推奨)
+
+
 def preprocess_and_sync_imu_data(data_file, rows_to_skip=11, sampling_interval_ms=5,
                                  right_prefix='R', left_prefix='L', trunk_prefix='T',
                                  sync_axis_suffix='_Acc_Y',
@@ -37,27 +41,33 @@ def preprocess_and_sync_imu_data(data_file, rows_to_skip=11, sampling_interval_m
         tuple: (sync_data_df, lags_dict, sampling_rate_hz)
                エラー時は (None, {}, sampling_rate_hz)
     """
-    print(f"--- [Function@preprocessing] 1. 全IMUデータの前処理・同期開始 (同期軸: {sync_axis_suffix}) ---")
+    print(
+        f"--- [Function@preprocessing] 1. 全IMUデータの前処理・同期開始 (同期軸: {sync_axis_suffix}) ---")
     sampling_rate_hz = 1000.0 / sampling_interval_ms
-    error_return = (None, {}, sampling_rate_hz) # エラー時の戻り値
+    error_return = (None, {}, sampling_rate_hz)  # エラー時の戻り値
 
     # --- データの読み込みと列名設定 ---
     try:
-        data_file_path = Path(data_file) if not isinstance(data_file, Path) else data_file
+        data_file_path = Path(data_file) if not isinstance(
+            data_file, Path) else data_file
         try:
-            df = pd.read_csv(data_file_path, skiprows=rows_to_skip, encoding='cp932')
+            df = pd.read_csv(
+                data_file_path, skiprows=rows_to_skip, encoding='cp932')
         except UnicodeDecodeError:
             print(f"  encoding='cp932' で失敗。encoding='shift_jis' を試します...")
-            df = pd.read_csv(data_file_path, skiprows=rows_to_skip, encoding='shift_jis')
+            df = pd.read_csv(
+                data_file_path, skiprows=rows_to_skip, encoding='shift_jis')
 
-        expected_column_names = get_expected_column_names(right_prefix, left_prefix, trunk_prefix)
+        expected_column_names = get_expected_column_names(
+            right_prefix, left_prefix, trunk_prefix)
         if len(df.columns) == len(expected_column_names):
             df.columns = expected_column_names
             blank_cols = [col for col in df.columns if 'Blank_' in col]
             df = df.drop(columns=blank_cols)
             print(f"  ファイル '{data_file_path.name}' 読込・列名修正完了。")
         else:
-            print(f"エラー: 列数不一致 ({len(df.columns)} vs {len(expected_column_names)})")
+            print(
+                f"エラー: 列数不一致 ({len(df.columns)} vs {len(expected_column_names)})")
             return error_return
     except FileNotFoundError:
         print(f"エラー: データファイルが見つかりません: {data_file_path}")
@@ -89,21 +99,24 @@ def preprocess_and_sync_imu_data(data_file, rows_to_skip=11, sampling_interval_m
             raise ValueError("同期に使用できるデータ長が0以下です。")
 
         # 各信号の先頭部分でピーク検出
-        print(f"  情報: 同期ピーク検出 (軸: {sync_axis_suffix}, 先頭 {actual_sync_length} samples, params: h={peak_height}, p={peak_prominence}, d={peak_distance})")
-        peak_found_all = True # 全てのピークが見つかったかフラグ
+        print(
+            f"  情報: 同期ピーク検出 (軸: {sync_axis_suffix}, 先頭 {actual_sync_length} samples, params: h={peak_height}, p={peak_prominence}, d={peak_distance})")
+        peak_found_all = True  # 全てのピークが見つかったかフラグ
         for prefix, signal_full in signals_full.items():
             signal_short = signal_full[:actual_sync_length]
-            peaks, _ = find_peaks(np.abs(signal_short), height=peak_height, prominence=peak_prominence, distance=peak_distance)
+            peaks, _ = find_peaks(np.abs(signal_short), height=peak_height,
+                                  prominence=peak_prominence, distance=peak_distance)
             if len(peaks) > 0:
-                peak_indices[prefix] = peaks[0] # 最初のピークを採用
-                print(f"    {prefix} ピーク検出 index: {peak_indices[prefix]} (値: {signal_short[peaks[0]]:.2f})")
+                peak_indices[prefix] = peaks[0]  # 最初のピークを採用
+                print(
+                    f"    {prefix} ピーク検出 index: {peak_indices[prefix]} (値: {signal_short[peaks[0]]:.2f})")
             else:
                 print(f"    警告: {prefix} で同期ピーク({sync_axis_suffix})検出不可。")
                 peak_found_all = False
                 # エラーメッセージをより具体的に
                 error_msg = f"{prefix} の同期ピーク({sync_axis_suffix})を検出できませんでした。\n" \
                             f"データ先頭部分を確認するか、find_peaksパラメータ(高さ/突出度/距離)を調整してください。"
-                raise ValueError(error_msg) # ピークが見つからない場合は明確なエラー
+                raise ValueError(error_msg)  # ピークが見つからない場合は明確なエラー
 
     except KeyError as e:
         print(f"エラー: {e}")
@@ -119,7 +132,8 @@ def preprocess_and_sync_imu_data(data_file, rows_to_skip=11, sampling_interval_m
     lag_L_vs_R = peak_indices[left_prefix] - peak_indices[right_prefix]
     lag_T_vs_R = peak_indices[trunk_prefix] - peak_indices[right_prefix]
     lags_dict = {'L_vs_R': lag_L_vs_R, 'T_vs_R': lag_T_vs_R}
-    print(f"  計算されたラグ (R基準, {sync_axis_suffix}ピーク): L={lag_L_vs_R}, T={lag_T_vs_R} [samples]")
+    print(
+        f"  計算されたラグ (R基準, {sync_axis_suffix}ピーク): L={lag_L_vs_R}, T={lag_T_vs_R} [samples]")
 
     # --- 全信号のアライメントとDataFrame作成 ---
     sync_data_df = None
@@ -138,35 +152,43 @@ def preprocess_and_sync_imu_data(data_file, rows_to_skip=11, sampling_interval_m
             # Acc_X列の存在を仮定 (なければエラーになる)
             col_for_len_check = f'{prefix}_Acc_X'
             if col_for_len_check not in df.columns:
-                 raise KeyError(f"アライメント長計算のための列 '{col_for_len_check}' が見つかりません。")
+                raise KeyError(
+                    f"アライメント長計算のための列 '{col_for_len_check}' が見つかりません。")
             original_lengths[prefix] = len(df[col_for_len_check])
 
         # アライメント後の長さを計算
         aligned_length = float('inf')
         for prefix, start_idx in start_indices.items():
             if start_idx < 0 or start_idx >= original_lengths[prefix]:
-                 raise ValueError(f"{prefix} の計算された開始インデックス({start_idx})が不正です (元データ長: {original_lengths[prefix]})。")
+                raise ValueError(
+                    f"{prefix} の計算された開始インデックス({start_idx})が不正です (元データ長: {original_lengths[prefix]})。")
             len_adj = original_lengths[prefix] - start_idx
             aligned_length = min(aligned_length, len_adj)
 
         if aligned_length <= 0 or aligned_length == float('inf'):
             raise ValueError(f"アライメント後のデータ長 ({aligned_length}) が不正です。")
-        aligned_length = int(aligned_length) # 整数化
+        aligned_length = int(aligned_length)  # 整数化
         print(f"  アライメント後のデータ長: {aligned_length} samples")
 
         # アライメント済みデータを格納する辞書
         aligned_data = {}
         # 時間ベクトル
-        time_aligned = np.arange(aligned_length) * (sampling_interval_ms / 1000.0)
+        time_aligned = np.arange(aligned_length) * \
+            (sampling_interval_ms / 1000.0)
         aligned_data['time_aligned_sec'] = time_aligned
 
         # アライメント対象の信号リスト (必要に応じて追加・変更)
         signals_to_process = [
-            (left_prefix, align_gyro_suffix), (right_prefix, align_gyro_suffix), # Gyro Z
-            (left_prefix, '_Acc_X'), (left_prefix, '_Acc_Y'), (left_prefix, '_Acc_Z'), # Left Acc
-            (right_prefix, '_Acc_X'), (right_prefix, '_Acc_Y'), (right_prefix, '_Acc_Z'), # Right Acc
-            (trunk_prefix, '_Acc_X'), (trunk_prefix, '_Acc_Y'), (trunk_prefix, '_Acc_Z'),
-            (trunk_prefix, '_Gyro_X'), (trunk_prefix, '_Gyro_Y'), (trunk_prefix, '_Gyro_Z')# Trunk Gyro
+            (left_prefix, align_gyro_suffix), (right_prefix,
+                                               align_gyro_suffix),  # Gyro Z
+            (left_prefix, '_Acc_X'), (left_prefix,
+                                      '_Acc_Y'), (left_prefix, '_Acc_Z'),  # Left Acc
+            (right_prefix, '_Acc_X'), (right_prefix,
+                                       '_Acc_Y'), (right_prefix, '_Acc_Z'),  # Right Acc
+            (trunk_prefix, '_Acc_X'), (trunk_prefix,
+                                       '_Acc_Y'), (trunk_prefix, '_Acc_Z'),
+            (trunk_prefix, '_Gyro_X'), (trunk_prefix,
+                                        '_Gyro_Y'), (trunk_prefix, '_Gyro_Z')  # Trunk Gyro
             # 必要なら Trunk Gyro も追加: (trunk_prefix, '_Gyro_X'), ...
         ]
         print(f"  アライメント対象信号: {[f'{p}{s}' for p, s in signals_to_process]}")
@@ -183,15 +205,16 @@ def preprocess_and_sync_imu_data(data_file, rows_to_skip=11, sampling_interval_m
 
             # スライス範囲の最終チェック
             if start_idx < 0 or end_idx > len(original_signal):
-                 raise ValueError(f"{output_col_name} のスライス範囲 ({start_idx}:{end_idx}) が元データ長 ({len(original_signal)}) を超えています。")
+                raise ValueError(
+                    f"{output_col_name} のスライス範囲 ({start_idx}:{end_idx}) が元データ長 ({len(original_signal)}) を超えています。")
 
-            aligned_signal = original_signal[start_idx : end_idx]
+            aligned_signal = original_signal[start_idx: end_idx]
 
             # 左 Gyro Z のみ符号反転
             if prefix == left_prefix and suffix == align_gyro_suffix:
                 aligned_signal = -aligned_signal
                 print(f"  情報: 左 {align_gyro_suffix} の符号を反転しました。")
-            #体幹の信号も反転
+            # 体幹の信号も反転
             if prefix == trunk_prefix and suffix == '_Acc_Z':
                 aligned_signal = -aligned_signal
                 print(f"  情報: 体幹 Acc Z ({col_name}) の符号を反転しました。")
@@ -201,7 +224,8 @@ def preprocess_and_sync_imu_data(data_file, rows_to_skip=11, sampling_interval_m
         # DataFrame作成
         sync_data_df = pd.DataFrame(aligned_data)
         # 列順序調整 (任意)
-        cols_order = ['time_aligned_sec'] + sorted([col for col in sync_data_df.columns if col != 'time_aligned_sec'])
+        cols_order = ['time_aligned_sec'] + \
+            sorted([col for col in sync_data_df.columns if col != 'time_aligned_sec'])
         sync_data_df = sync_data_df[cols_order]
 
     except KeyError as e:
