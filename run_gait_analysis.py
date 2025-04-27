@@ -496,8 +496,8 @@ class GaitAnalysisApp:
             result_message = f"前処理完了。\nLag (R基準, {SYNC_SIGNAL_SUFFIX}ピーク): L={lag_L_R}, T={lag_T_R} [samples]"
             print(f"\n[成功] {result_message}")
             base_filename = self.input_file_path.stem
-            output_sync_file = OUTPUT_FOLDER / \
-                (base_filename + OUTPUT_SUFFIX_SYNC)
+            output_sync_file = output_folder/ \
+                (identifier + OUTPUT_SUFFIX_SYNC)
             print(f"\n[ステップ1.1] 同期済み全IMUデータ保存中...")
             save_results(output_sync_file, self.sync_data_df, "同期済みIMUデータ")
 
@@ -575,8 +575,8 @@ class GaitAnalysisApp:
                             print(
                                 f"  定常歩行区間抽出: {removed_ic} 件除去 → 残り {len(ic_events_df_trunk)} 件")
 
-                        output_gait_file_trunk_ic = OUTPUT_FOLDER / \
-                            (base_filename + OUTPUT_SUFFIX_GAIT_TRUNK_IC)
+                        output_gait_file_trunk_ic = output_folder/ \
+                (identifier + OUTPUT_SUFFIX_GAIT_TRUNK_IC)
                         print(f"\n[ステップ2bis.1] 体幹ICイベントデータ保存中...")
                         save_results(output_gait_file_trunk_ic,
                                      ic_events_df_trunk, "ICイベントデータ(体幹)")
@@ -726,8 +726,8 @@ class GaitAnalysisApp:
                     self.gait_events_shank_steady = gait_events_df_shank_steady  # 結果保持
                     if not self.gait_events_shank_steady.empty:
                         # 保存
-                        output_gait_file = OUTPUT_FOLDER / \
-                            (base_filename + OUTPUT_SUFFIX_GAIT_TRIMMED)
+                        output_gait_file = output_folder/ \
+                (identifier + OUTPUT_SUFFIX_GAIT_TRIMMED)
                         print(f"\n[ステップ2.3] 定常歩行周期データ(下腿ベース)保存中...")
                         save_results(
                             output_gait_file, self.gait_events_shank_steady, "定常歩行周期(下腿GyroZ)")
@@ -781,8 +781,8 @@ class GaitAnalysisApp:
                             results_all['iHR_AP'] = mean_ihr_ap
                             results_all['iHR_VT'] = mean_ihr_vt
                             results_all['iHR_ML'] = mean_ihr_ml
-                            output_all_params_file = OUTPUT_FOLDER / \
-                                (base_filename + OUTPUT_ALL_PARAMS_FILE)
+                            output_all_params_file = output_folder/ \
+                (identifier + OUTPUT_ALL_PARAMS_FILE)
                             print(f"\n[ステップ3.1] 全パラメータ(下腿ベース)保存中...")
                             save_results(output_all_params_file, pd.DataFrame(
                                 [results_all]), "全歩行パラメータ(下腿ベース)")
