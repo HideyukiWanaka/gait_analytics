@@ -3,6 +3,7 @@
 # --- 各機能ファイルをインポート ---
 from scipy.signal import find_peaks
 from scipy.signal import butter, filtfilt
+from feedback_ui import show_feedback_window
 from harmonic_ratio import calculate_harmonic_ratio
 from harmonic_ratio import calculate_integrated_harmonic_ratio
 from symmetry_indices import calculate_symmetry_index
@@ -21,6 +22,7 @@ from matplotlib.figure import Figure
 import matplotlib.pyplot as plt
 import tkinter as tk
 from tkinter import Frame, Label, Button, BOTH, W, LEFT, messagebox, HORIZONTAL, Scale, Toplevel, DISABLED, NORMAL
+from tkinter import ttk
 import matplotlib
 matplotlib.use('TkAgg')  # Tkinter連携用バックエンドを明示的に指定
 
@@ -364,6 +366,28 @@ class GaitAnalysisApp:
         self.update_trunk_ic_button = Button(
             button_frame, text="2. 体幹IC 更新&プロット", command=self.update_trunk_ic_results, width=25, state=DISABLED)
         self.update_trunk_ic_button.pack(pady=5)
+
+        # 結果フィードバックボタン
+        self.feedback_button = Button(
+            button_frame,
+            text="3. 結果フィードバック",
+            command=self.on_feedback,
+            width=25,
+            state=DISABLED
+        )
+        self.feedback_button.pack(pady=5)
+
+        # フィードバック用セグメント指定
+        Label(button_frame, text="Feedback セグメントID:").pack(pady=2)
+        self.segment_var = tk.IntVar(value=0)
+        self.segment_combo = ttk.Combobox(
+            button_frame,
+            textvariable=self.segment_var,
+            values=[],
+            state='disabled',
+            width=5
+        )
+        self.segment_combo.pack(pady=2)
 
         # 初期データロード
         self.status_label.config(text="最新ファイル検索中...")
@@ -811,6 +835,33 @@ class GaitAnalysisApp:
 
             print("\n--- 解析パイプライン 完了 ---")
             self.status_label.config(text="解析完了")
+            # フィードバック用データを保持
+            # 体幹ICのTrial_IDを下腿イベントのTrial_IDに合わせて再割り当て
+            trunk_df = ic_events_df_trunk.copy()
+            if gait_events_df_shank_steady is not None and not gait_events_df_shank_steady.empty:
+                reassigned = []
+                for tid, grp in gait_events_df_shank_steady.groupby('Trial_ID', sort=True):
+                    t0, t1 = grp['IC_Time'].min(), grp['IC_Time'].max()
+                    sel = trunk_df[(trunk_df['IC_Time'] >= t0) & (trunk_df['IC_Time'] <= t1)].copy()
+                    if not sel.empty:
+                        sel['Trial_ID'] = tid
+                        reassigned.append(sel)
+                if reassigned:
+                    trunk_df = pd.concat(reassigned).reset_index(drop=True)
+            self._fb_trunk_df = trunk_df
+            self._fb_shank_df = gait_events_df_shank_steady
+            self._fb_trunk_signals = {'AP': fa_trunk, 'VT': filtered_vt, 'ML': filtered_ml}
+            self._fb_shank_signals = filtered_signals_gyro
+            self._fb_time_vector = self.time_vector
+            self._fb_results = results_all
+            self.feedback_button.config(state=NORMAL)
+            # セグメント選択肢を更新
+            ids = sorted(self._fb_shank_df['Trial_ID'].unique()) if self._fb_shank_df is not None and not self._fb_shank_df.empty else []
+            if ids:
+                self.segment_combo.config(values=ids, state='readonly')
+                self.segment_var.set(ids[0])
+            else:
+                self.segment_combo.config(values=[], state='disabled')
 
         except Exception as e:
             print(f"\n[エラー] 解析パイプライン実行中にエラー: {e}")
@@ -873,27 +924,31 @@ class GaitAnalysisApp:
                     "filtered_lr_gyro_signal")
                 # time_vector は self.time_vector を使用
 
-                # --- stumble detection and cut everything after ---
-                stumble_time = detect_stumble(self.time_vector, filtered_lr,
-                                              neg_thresh=-30, pos_thresh=70, window_sec=0.3)
-                if stumble_time is not None:
-                    cut_idx = np.searchsorted(
-                        self.time_vector, stumble_time, side='left')
-                    # truncate time and signals
-                    self.time_vector = self.time_vector[:cut_idx]
-                    filtered_ap = filtered_ap[:cut_idx]
-                    filtered_lr = filtered_lr[:cut_idx]
-                    # remove IC events after stumble
-                    ic_events_df_trunk = ic_events_df_trunk[ic_events_df_trunk['IC_Time'] < stumble_time]
-                    print(
-                        f"[Stumble] Detected at {stumble_time:.2f}s → remaining IC: {len(ic_events_df_trunk)}")
-
                 if ic_events_df_trunk is None or ic_events_df_trunk.empty:
                     print("体幹IC検出失敗(更新)")
                     messagebox.showwarning(
                         "IC同定(更新)", "指定パラメータでIC検出失敗", parent=self.master)
                 else:
                     print(f"{len(ic_events_df_trunk)} 個のIC検出(更新)。プロット表示...")
+                    # --- 体幹IC更新後に同じセグメント分割と前後除外処理を適用 ---
+                    # セグメンテーション (IC間隔 ≥0.7s, 最低1IC)
+                    trunk_segmented = segment_walking_trials(
+                        events_df=ic_events_df_trunk,
+                        max_interval_sec=0.7,
+                        min_ics_per_trial=1
+                    )
+                    if trunk_segmented is not None and not trunk_segmented.empty:
+                        # 16以下の小セグメントを除去
+                        trunk_filtered = trunk_segmented.groupby('Trial_ID') \
+                                                        .filter(lambda g: len(g) > 16)
+                        # 前後除外 (先頭5歩, 末尾8歩)
+                        ic_events_df_trunk = trim_trial_ends(
+                            df_segmented=trunk_filtered,
+                            n_start=TRUNK_NUM_ICS_REMOVE_START,
+                            n_end=TRUNK_NUM_ICS_REMOVE_END
+                        )
+                    else:
+                        print("体幹IC更新後: 有効トライアルなし")
                     if filtered_ap is not None and filtered_lr is not None and self.time_vector is not None:
                         # ★ プロット関数呼び出し ★
                         self.plot_trunk_ics(
@@ -916,6 +971,26 @@ class GaitAnalysisApp:
         finally:
             self.update_trunk_ic_button.config(state=NORMAL)
             self.master.update_idletasks()
+
+    def on_feedback(self):
+        """フィードバックウィンドウをボタンクリックで表示"""
+        try:
+            # 選択されたセグメントIDでDataFrameをフィルタ
+            sid = self.segment_var.get()
+            td = self._fb_trunk_df[self._fb_trunk_df['Trial_ID'] == sid] if self._fb_trunk_df is not None else None
+            sd = self._fb_shank_df[self._fb_shank_df['Trial_ID'] == sid] if self._fb_shank_df is not None else None
+            show_feedback_window(
+                parent=self.master,
+                trunk_df=td,
+                shank_df=sd,
+                trunk_signals=self._fb_trunk_signals,
+                shank_signals=self._fb_shank_signals,
+                time_vector=self._fb_time_vector,
+                results_dict=self._fb_results,
+                segment_id=sid
+            )
+        except Exception as e_fb:
+            print(f"フィードバックウィンドウ表示エラー: {e_fb}")
 
     # --- IC/FO イベントプロット用メソッド (下腿GyroZ用) ---
     def plot_gait_events(self, gait_events_df, filtered_signals, time_vector):
@@ -1012,17 +1087,17 @@ class GaitAnalysisApp:
                 leg_events = ic_events_df[ic_events_df['Leg'] == leg]
                 ic_times = leg_events['IC_Time'].dropna().values
                 ic_idx = np.searchsorted(time_vector, ic_times, side='left')
-                valid = ic_idx[(ic_idx >= 0) & (ic_idx < len(signal_ap))]
-                if len(valid) > 0:
-                    ax_ap.plot(time_vector[valid], signal_ap[valid],
+                ic_idx = np.clip(ic_idx, 0, len(time_vector) - 1)
+                if ic_idx.size > 0:
+                    ax_ap.plot(time_vector[ic_idx], signal_ap[ic_idx],
                                linestyle='None', marker=marker, color=color, ms=6, label=f'IC({leg})')
             # unknown leg
             unk_times = ic_events_df[ic_events_df['Leg']
                                      == 'Unknown']['IC_Time'].dropna().values
             unk_idx = np.searchsorted(time_vector, unk_times, side='left')
-            valid_unk = unk_idx[(unk_idx >= 0) & (unk_idx < len(signal_ap))]
-            if len(valid_unk) > 0:
-                ax_ap.plot(time_vector[valid_unk], signal_ap[valid_unk],
+            unk_idx = np.clip(unk_idx, 0, len(time_vector) - 1)
+            if unk_idx.size > 0:
+                ax_ap.plot(time_vector[unk_idx], signal_ap[unk_idx],
                            linestyle='None', marker='x', color='gray', ms=6, label='IC(Unknown)')
             ax_ap.set_title('体幹 AP(Z) 加速度 – 検出IC位置')
             ax_ap.set_ylabel('加速度 (units)')
@@ -1038,17 +1113,17 @@ class GaitAnalysisApp:
                 leg_events = ic_events_df[ic_events_df['Leg'] == leg]
                 ic_times = leg_events['IC_Time'].dropna().values
                 ic_idx = np.searchsorted(time_vector, ic_times, side='left')
-                valid = ic_idx[(ic_idx >= 0) & (ic_idx < len(signal_lr))]
-                if len(valid) > 0:
-                    ax_lr.plot(time_vector[valid], signal_lr[valid],
+                ic_idx = np.clip(ic_idx, 0, len(time_vector) - 1)
+                if ic_idx.size > 0:
+                    ax_lr.plot(time_vector[ic_idx], signal_lr[ic_idx],
                                linestyle='None', marker=marker, color=color, ms=6, label=f'IC({leg})')
             # unknown leg
             unk_times = ic_events_df[ic_events_df['Leg']
                                      == 'Unknown']['IC_Time'].dropna().values
             unk_idx = np.searchsorted(time_vector, unk_times, side='left')
-            valid_unk = unk_idx[(unk_idx >= 0) & (unk_idx < len(signal_lr))]
-            if len(valid_unk) > 0:
-                ax_lr.plot(time_vector[valid_unk], signal_lr[valid_unk],
+            unk_idx = np.clip(unk_idx, 0, len(time_vector) - 1)
+            if unk_idx.size > 0:
+                ax_lr.plot(time_vector[unk_idx], signal_lr[unk_idx],
                            linestyle='None', marker='x', color='gray', ms=6, label='IC(Unknown)')
             ax_lr.set_title('体幹 Yaw(Y軸) Gyro と検出IC (LR判定用)')
             ax_lr.set_ylabel('角速度(単位?)')
