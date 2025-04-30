@@ -102,10 +102,29 @@ def preprocess_and_sync_imu_data(data_file, rows_to_skip=11, sampling_interval_m
         print(
             f"  情報: 同期ピーク検出 (軸: {sync_axis_suffix}, 先頭 {actual_sync_length} samples, params: h={peak_height}, p={peak_prominence}, d={peak_distance})")
         peak_found_all = True  # 全てのピークが見つかったかフラグ
+
+        temp_df = df.iloc[:actual_sync_length, :]
+        sync_l = temp_df[f"{left_prefix}{sync_axis_suffix}"].fillna(0).values
+        sync_r = temp_df[f"{right_prefix}{sync_axis_suffix}"].fillna(0).values
+
+        # --- Height が負の場合、同期信号を反転し閾値を絶対値に変更 ---
+        if peak_height is not None and peak_height < 0:
+            sync_l = -sync_l
+            sync_r = -sync_r
+            peak_height = abs(peak_height)
+            print("[INFO] preprocess: 同期用信号を反転 (Height < 0) & 閾値を abs() 化")
+
         for prefix, signal_full in signals_full.items():
             signal_short = signal_full[:actual_sync_length]
-            peaks, _ = find_peaks(np.abs(signal_short), height=peak_height,
-                                  prominence=peak_prominence, distance=peak_distance)
+            if prefix == left_prefix:
+                peaks, _ = find_peaks(np.abs(sync_l), height=peak_height,
+                                      prominence=peak_prominence, distance=peak_distance)
+            elif prefix == right_prefix:
+                peaks, _ = find_peaks(np.abs(sync_r), height=peak_height,
+                                      prominence=peak_prominence, distance=peak_distance)
+            else:
+                peaks, _ = find_peaks(np.abs(signal_short), height=peak_height,
+                                      prominence=peak_prominence, distance=peak_distance)
             if len(peaks) > 0:
                 peak_indices[prefix] = peaks[0]  # 最初のピークを採用
                 print(

@@ -14,6 +14,7 @@ from pci import calculate_pci
 from gait_cycles import identify_gait_cycles, identify_ics_from_trunk_accel
 from preprocessing import preprocess_and_sync_imu_data  # 関数名注意
 from pathlib import Path
+import sys
 import numpy as np
 import pandas as pd
 import matplotlib.font_manager as fm
@@ -25,6 +26,11 @@ from tkinter import Frame, Label, Button, BOTH, W, LEFT, messagebox, HORIZONTAL,
 from tkinter import ttk
 import matplotlib
 matplotlib.use('TkAgg')  # Tkinter連携用バックエンドを明示的に指定
+
+# If a CSV path is provided on the command line, use it in GUI mode
+INPUT_FILE_ARG = None
+if len(sys.argv) > 1:
+    INPUT_FILE_ARG = Path(sys.argv[1])
 
 # --- Stumble detection utility ---
 
@@ -273,7 +279,7 @@ class GaitAnalysisApp:
         frame_h = Frame(param_sync_frame)
         frame_h.pack(fill=tk.X)
         Label(frame_h, text="Height:", width=10, anchor=W).pack(side=LEFT)
-        scale_h = Scale(frame_h, from_=0, to=50, resolution=0.1, orient=HORIZONTAL, variable=self.height_var,
+        scale_h = Scale(frame_h, from_=-50, to=50, resolution=0.1, orient=HORIZONTAL, variable=self.height_var,
                         length=120, command=lambda v: self.height_label_val.config(text=f"{float(v):.1f}"))
         scale_h.pack(side=LEFT)
         self.height_label_val = Label(
@@ -397,7 +403,10 @@ class GaitAnalysisApp:
     def load_and_plot_initial_data(self):
         """最新CSVをロードし、初期プロットを表示、ボタンを有効化"""
         print("\n[準備] 最新のCSVデータを検索中...")
-        self.input_file_path = find_latest_csv_file(DATA_FOLDER)
+        if INPUT_FILE_ARG is not None:
+            self.input_file_path = INPUT_FILE_ARG
+        else:
+            self.input_file_path = find_latest_csv_file(DATA_FOLDER)
         if self.input_file_path is None:
             messagebox.showerror(
                 "エラー", f"CSVファイルが見つかりません ({DATA_FOLDER.resolve()})", parent=self.master)
@@ -434,6 +443,12 @@ class GaitAnalysisApp:
                 0).values
             sync_t_full = temp_df[f'{TRUNK_PREFIX}{SYNC_SIGNAL_SUFFIX}'].fillna(
                 0).values
+            # Height が負の場合、同期信号を自動反転
+            if self.height_var.get() < 0:
+                sync_l_full = -sync_l_full
+                sync_r_full = -sync_r_full
+                sync_t_full = -sync_t_full
+                print("[INFO] 同期信号を自動反転 (Height < 0)")
             plot_len = min(len(sync_l_full), len(sync_r_full),
                            len(sync_t_full), NUM_SAMPLES_TO_PLOT)
             if plot_len <= 0:
@@ -548,6 +563,9 @@ class GaitAnalysisApp:
                     print("  下腿ベース周期検出不可")
                 else:
                     print(f"  {len(gait_events_df_shank_all)} 個の下腿ベース候補検出")
+                    # 検出された下腿IC候補の先頭10件を確認
+                    print("下腿IC候補(先頭10件):")
+                    print(gait_events_df_shank_all[['Leg','IC_Time','FO_Time']].head(10).to_string(index=False))
 
             # === ステップ 2bis: 歩行周期同定 (体幹 Acc Z/Y ベース IC+LR) ===
             if self.sync_data_df is not None and self.time_vector is not None:
@@ -575,13 +593,19 @@ class GaitAnalysisApp:
                             max_interval_sec=0.7,      # 2秒以上空いたら別セグメント
                             min_ics_per_trial=1        # 最低1ICを残す
                         )
+                        # デバッグ: セグメンテーション後のイベント数
+                        print(f"[DEBUG] 体幹セグメント化後のイベント数: {0 if trunk_segmented is None else len(trunk_segmented)}")
                         if trunk_segmented is None or trunk_segmented.empty:
                             print("  体幹ICに基づく歩行区間分割結果なし")
                         else:
                             # 各 Trial_ID ごとの IC 個数を数えて、16 以下のグループを削除
                             before_cnt = len(trunk_segmented)
+                            # デバッグ: 小セグメント除去前のイベント数 = {before_cnt}
+                            print(f"# デバッグ: 小セグメント除去前のイベント数 = {before_cnt}")
                             trunk_filtered = trunk_segmented.groupby('Trial_ID') \
                                                             .filter(lambda g: len(g) > 16)
+                            # デバッグ: 小セグメント除去後のイベント数: {len(trunk_filtered)}
+                            print(f"# デバッグ: 小セグメント除去後のイベント数: {len(trunk_filtered)}")
                             removed = before_cnt - len(trunk_filtered)
                             print(
                                 f"  小セグメント(≤16 IC)を {removed} イベント分除去 → 残り {len(trunk_filtered)} イベント")
@@ -597,6 +621,8 @@ class GaitAnalysisApp:
                                 n_start=TRUNK_NUM_ICS_REMOVE_START,
                                 n_end=TRUNK_NUM_ICS_REMOVE_END
                             )
+                            # デバッグ: トリミング後最終イベント数: {len(ic_events_df_trunk)}
+                            print(f"# デバッグ: トリミング後最終イベント数: {len(ic_events_df_trunk)}")
                             removed_ic = ic_before - len(ic_events_df_trunk)
                             print(
                                 f"  定常歩行区間抽出: {removed_ic} 件除去 → 残り {len(ic_events_df_trunk)} 件")
@@ -692,6 +718,8 @@ class GaitAnalysisApp:
                 print("\n[ステップ2.1] 歩行トライアルの自動分割 (下腿ベース) を実行中...")
                 gait_events_df_shank_segmented = segment_walking_trials(
                     gait_events_df_shank_all, MAX_IC_INTERVAL_SEC, MIN_ICS_PER_TRIAL)
+                # デバッグ: セグメンテーション後の下腿イベント数
+                print(f"[DEBUG][Shank] セグメント化後のイベント数: {len(gait_events_df_shank_segmented) if gait_events_df_shank_segmented is not None else 0}")
                 # --- per-trial stumble truncation for shank events ---
                 cleaned_segments = []
                 for trial_id, trial_grp in gait_events_df_shank_segmented.groupby('Trial_ID'):
@@ -736,11 +764,17 @@ class GaitAnalysisApp:
                     cleaned_segments).reset_index(drop=True)
                 print(
                     f"  [Shank] Per-trial stumble truncation applied, remaining events: {len(gait_events_df_shank_segmented)}")
+                # デバッグ: トランクケーション後の下腿イベント数
+                print(f"[DEBUG][Shank] つまずき後のイベント数: {len(gait_events_df_shank_segmented)}")
                 if not gait_events_df_shank_segmented.empty:
                     print("\n[ステップ2.2] 定常歩行部分の抽出（前後除外, 下腿ベース）を実行中...")
+                    # デバッグ: トリミング前の下腿イベント数
+                    print(f"[DEBUG][Shank] トリミング前イベント数: {len(gait_events_df_shank_segmented)}")
                     gait_events_df_shank_steady = trim_trial_ends(
                         gait_events_df_shank_segmented, NUM_ICS_REMOVE_START, NUM_ICS_REMOVE_END)
                     self.gait_events_shank_steady = gait_events_df_shank_steady  # 結果保持
+                    # デバッグ: トリミング後の下腿イベント数
+                    print(f"[DEBUG][Shank] トリミング後イベント数: {len(self.gait_events_shank_steady)}")
                     if not self.gait_events_shank_steady.empty:
                         # 保存
                         output_gait_file = output_folder   / (identifier + OUTPUT_SUFFIX_GAIT_TRIMMED)
@@ -868,6 +902,9 @@ class GaitAnalysisApp:
             messagebox.showerror(
                 "実行時エラー", f"解析中にエラー:\n{e}", parent=self.master)
             self.status_label.config(text="エラー発生")
+            # エラー時でも同期状態確認のグラフを出力
+            if self.sync_data_df is not None:
+                self.plot_final_synchronized_data(self.sync_data_df)
         finally:
             self.run_button.config(state=NORMAL)
             if self.sync_data_df is not None and not self.sync_data_df.empty:
