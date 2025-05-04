@@ -1,4 +1,4 @@
-# gait_cy# gait_cycles.py
+# gait_cycles.py
 import pandas as pd
 import numpy as np
 from scipy.signal import butter, filtfilt, find_peaks
