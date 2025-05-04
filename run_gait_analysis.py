@@ -35,7 +35,7 @@ if len(sys.argv) > 1:
 # --- Stumble detection utility ---
 
 
-def detect_stumble(time_vector, signal_lr, neg_thresh=-30, pos_thresh=70, window_sec=0.3):
+def detect_stumble(time_vector, signal_lr, neg_thresh=-30, pos_thresh=70, window_sec=0.05):
     """
     Detect first “stumble” event: a negative trough below neg_thresh
     followed within window_sec by a positive peak above pos_thresh.
@@ -101,8 +101,8 @@ NUM_SAMPLES_TO_PLOT = 1000        # 初期プロットで表示するサンプ�
 # 体幹IC検出用パラメータ (GUIの初期値 - 要調整)
 TRUNK_IC_FILTER_CUTOFF = 20.0
 TRUNK_IC_PEAK_HEIGHT = 0.1
-TRUNK_IC_PEAK_PROMINENCE = 0.2
-TRUNK_IC_PEAK_DISTANCE_MS = 300
+TRUNK_IC_PEAK_PROMINENCE = 1.5
+TRUNK_IC_PEAK_DISTANCE_MS = 800
 MIN_STEP_TIME_SEC = 0.3
 TRUNK_LR_GYRO_THRESHOLD = 12.5  # Gyro Y 左右判定閾値
 
@@ -110,7 +110,7 @@ TRUNK_LR_GYRO_THRESHOLD = 12.5  # Gyro Y 左右判定閾値
 SHANK_SWING_THRESHOLD = 100  # 下腿GyroZ用
 
 MAX_IC_INTERVAL_SEC = 0.8  # IC間隔上限を0.8秒に設定（大きめのギャップでセグメント分割）
-MIN_ICS_PER_TRIAL = 15
+MIN_ICS_PER_TRIAL = 5  # 最小IC数を10に設定（短いトライアルを除外）
 
 
 # 下腿ベース定常歩行抽出用パラメータ (先頭3歩・末尾5歩)
@@ -189,43 +189,38 @@ def segment_walking_trials(events_df, max_interval_sec, min_ics_per_trial):
 def trim_trial_ends(df_segmented, n_start=3, n_end=5):
     """
     Trial_ID ごとに IC_Time で時系列ソートした上で、
-    * 先頭から n_start 個
-    * 末尾から n_end 個
-    をまとめて除外する。
-
-    この操作は左右の脚を合わせた連続シーケンス単位で行われます。
+    先頭から n_start 個、末尾から n_end 個のICイベントを
+    まとめて除外する（脚をまたいだインターリーブ方式）。
     """
     print(f"--- トライアル前後除外開始 (先頭: {n_start}歩, 末尾: {n_end}歩) ---")
     if df_segmented is None or df_segmented.empty:
         return pd.DataFrame()
+    # 必要列チェック
     if 'Trial_ID' not in df_segmented.columns or 'IC_Time' not in df_segmented.columns:
         print("警告: 前後除外に必要な列が不足しています。")
-        return df_segmented
+        return pd.DataFrame()
 
     trimmed_trials = []
-    total_removed = 0
     original_count = len(df_segmented)
 
-    # Trial_ID ごとに一連の IC を扱う
+    # Trial_ID ごとにまとめ、脚をまたいだ連続シーケンスとしてトリミング
     for trial_id, grp in df_segmented.groupby('Trial_ID', sort=False):
         grp_sorted = grp.sort_values('IC_Time').copy()
-        count = len(grp_sorted)
-        # 十分な数がないトライアルはそのままスキップ
-        if count <= (n_start + n_end):
-            total_removed += count
+        total = len(grp_sorted)
+        # 除外できるだけのイベントがない場合はスキップ
+        if total <= n_start + n_end:
             continue
-        # 先頭 n_start と末尾 n_end をまとめて除外
-        grp_trimmed = grp_sorted.iloc[n_start: count - n_end]
-        trimmed_trials.append(grp_trimmed)
-        total_removed += count - len(grp_trimmed)
+        # 先頭 n_start と末尾 n_end をまとめてトリミング
+        trimmed = grp_sorted.iloc[n_start: total - n_end]
+        trimmed_trials.append(trimmed)
 
     if not trimmed_trials:
         print("警告: 前後除外の結果、有効なトライアルがありません。")
         return pd.DataFrame()
 
     df_out = pd.concat(trimmed_trials).reset_index(drop=True)
-    print(
-        f"  前後除外処理完了。 {original_count} -> {len(df_out)} イベント削除数: {total_removed}")
+    removed = original_count - len(df_out)
+    print(f"  前後除外処理完了。 {original_count} -> {len(df_out)} イベント ({removed} 件除外)")
     return df_out
 
 
@@ -362,6 +357,21 @@ class GaitAnalysisApp:
         self.trunk_mst_label = Label(
             frame_mst, text=f"{self.min_step_time_var.get():.2f}", width=5)
         self.trunk_mst_label.pack(side=LEFT, padx=2)
+
+        # --- セグメント分割用パラメータ (IC間隔) ---
+        segment_param_frame = Frame(param_area_frame, borderwidth=1, relief=tk.GROOVE)
+        segment_param_frame.pack(side=LEFT, padx=5, pady=2, fill=tk.Y, anchor=tk.N)
+        Label(segment_param_frame, text="セグメント分割閾値").pack(pady=2)
+        self.max_interval_var = tk.DoubleVar(value=MAX_IC_INTERVAL_SEC)
+        frame_si = Frame(segment_param_frame)
+        frame_si.pack(fill=tk.X)
+        Label(frame_si, text="IC間隔 (s):", width=12, anchor=W).pack(side=LEFT)
+        scale_si = Scale(frame_si, from_=0.1, to=5.0, resolution=0.1, orient=HORIZONTAL,
+                         variable=self.max_interval_var, length=100,
+                         command=lambda v: self.max_interval_label.config(text=f"{float(v):.1f}"))
+        scale_si.pack(side=LEFT)
+        self.max_interval_label = Label(frame_si, text=f"{self.max_interval_var.get():.1f}", width=5)
+        self.max_interval_label.pack(side=LEFT, padx=2)
 
         # --- 実行ボタンエリア ---
         button_frame = Frame(param_area_frame)
@@ -563,6 +573,13 @@ class GaitAnalysisApp:
                     print("  下腿ベース周期検出不可")
                 else:
                     print(f"  {len(gait_events_df_shank_all)} 個の下腿ベース候補検出")
+                    # ─── 削除前の下腿IC候補をグラフで確認 ───
+                    print("[DEBUG] プロット: 削除前の下腿IC候補を表示します…")
+                    self.plot_gait_events(
+                        gait_events_df_shank_all,
+                        filtered_signals_gyro,
+                        self.time_vector
+                    )
                     # 検出された下腿IC候補の先頭10件を確認
                     print("下腿IC候補(先頭10件):")
                     print(gait_events_df_shank_all[['Leg','IC_Time','FO_Time']].head(10).to_string(index=False))
@@ -586,11 +603,21 @@ class GaitAnalysisApp:
                         print("  体幹IC検出失敗")
                     else:
                         print(f"  {len(ic_events_df_trunk)} 個の体幹IC検出")
+                        # ─── 削除前ICのグラフ確認 ───
+                        print("[DEBUG] プロット: 削除前の体幹ICを表示します…")
+                        filtered_ap = self.trunk_ic_results["filtered_ap_signal"]
+                        filtered_lr = self.trunk_ic_results["filtered_lr_gyro_signal"]
+                        self.plot_trunk_ics(
+                            ic_events_df_trunk,
+                            filtered_ap,
+                            filtered_lr,
+                            self.time_vector
+                        )
                         # --- ステップ2bis.2: 体幹ICを基に歩行区間を分割 (IC_Time間隔 ≥ 2秒) ---
                         print("\n[ステップ2bis.2] 体幹ICを基に歩行区間分割 (IC_Time間隔 ≥2秒)")
                         trunk_segmented = segment_walking_trials(
                             events_df=ic_events_df_trunk,
-                            max_interval_sec=0.7,      # 2秒以上空いたら別セグメント
+                            max_interval_sec=self.max_interval_var.get(),      # GUIで指定したIC間隔
                             min_ics_per_trial=1        # 最低1ICを残す
                         )
                         # デバッグ: セグメンテーション後のイベント数
@@ -717,7 +744,7 @@ class GaitAnalysisApp:
             if gait_events_df_shank_all is not None and not gait_events_df_shank_all.empty:
                 print("\n[ステップ2.1] 歩行トライアルの自動分割 (下腿ベース) を実行中...")
                 gait_events_df_shank_segmented = segment_walking_trials(
-                    gait_events_df_shank_all, MAX_IC_INTERVAL_SEC, MIN_ICS_PER_TRIAL)
+                    gait_events_df_shank_all, self.max_interval_var.get(), MIN_ICS_PER_TRIAL)
                 # デバッグ: セグメンテーション後の下腿イベント数
                 print(f"[DEBUG][Shank] セグメント化後のイベント数: {len(gait_events_df_shank_segmented) if gait_events_df_shank_segmented is not None else 0}")
                 # --- per-trial stumble truncation for shank events ---
@@ -739,23 +766,21 @@ class GaitAnalysisApp:
                         idx_start:idx_end]
                     # detect stumble per leg within trial window
                     t_L = detect_stumble(
-                        tv_trial, sig_L, neg_thresh=-30, pos_thresh=70, window_sec=0.3)
+                        tv_trial, sig_L, neg_thresh=-30, pos_thresh=70, window_sec=0.05)
                     t_R = detect_stumble(
-                        tv_trial, sig_R, neg_thresh=-30, pos_thresh=70, window_sec=0.3)
+                        tv_trial, sig_R, neg_thresh=-30, pos_thresh=70, window_sec=0.05)
                     # pick earliest stumble time if any
                     t_cand = [t for t in (t_L, t_R) if t is not None]
                     if t_cand:
                         t_stumble = min(t_cand)
                         # only apply if at least 3 IC events precede the stumble
-                        pre_ic = trial_grp[trial_grp['IC_Time'] < t_stumble]
+                        pre_ic = trial_grp.loc[trial_grp['IC_Time'] < t_stumble]
                         if len(pre_ic) >= 3:
-                            # filter out events after stumble
-                            trial_grp = trial_grp[pre_ic.index]
-                            trial_grp = trial_grp[trial_grp['IC_Time']
-                                                  < t_stumble]
+                            # filter out events after stumble using row labels
+                            trial_grp = trial_grp.loc[pre_ic.index]
+                            trial_grp = trial_grp.loc[trial_grp['IC_Time'] < t_stumble]
                             if 'FO_Time' in trial_grp.columns:
-                                trial_grp = trial_grp[trial_grp['FO_Time']
-                                                      < t_stumble]
+                                trial_grp = trial_grp.loc[trial_grp['FO_Time'] < t_stumble]
                         else:
                             # do not truncate this trial (stumble too early, likely noise)
                             pass
@@ -968,10 +993,10 @@ class GaitAnalysisApp:
                 else:
                     print(f"{len(ic_events_df_trunk)} 個のIC検出(更新)。プロット表示...")
                     # --- 体幹IC更新後に同じセグメント分割と前後除外処理を適用 ---
-                    # セグメンテーション (IC間隔 ≥0.7s, 最低1IC)
+                    # セグメンテーション (IC間隔 ≥ 指定値, 最低1IC)
                     trunk_segmented = segment_walking_trials(
                         events_df=ic_events_df_trunk,
-                        max_interval_sec=0.7,
+                        max_interval_sec=self.max_interval_var.get(),
                         min_ics_per_trial=1
                     )
                     if trunk_segmented is not None and not trunk_segmented.empty:
