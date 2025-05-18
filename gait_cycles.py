@@ -107,9 +107,8 @@ def identify_gait_cycles(sync_gyro_df, sampling_rate_hz,
                                     prominence=swing_peak_prominence, distance=min_peak_distance_samples)
         # print(f"  {leg_prefix}脚: {len(swing_peaks)} 個のSwingピーク検出") # ログ削減
 
-        # 4. IC候補 (谷) 検出
-        ic_candidates, _ = find_peaks(
-            -signal_filt, prominence=min_peak_prominence, distance=min_peak_distance_samples)
+        # 4. IC候補 (谷) 検出: スイング後の最初の負のピークを必ずICとする
+        ic_candidates, _ = find_peaks(-signal_filt)
         # print(f"  {leg_prefix}脚: {len(ic_candidates)} 個のIC候補検出")
 
         # 5. FO候補 (谷) 検出

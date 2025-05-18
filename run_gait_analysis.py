@@ -220,7 +220,8 @@ def trim_trial_ends(df_segmented, n_start=3, n_end=5):
 
     df_out = pd.concat(trimmed_trials).reset_index(drop=True)
     removed = original_count - len(df_out)
-    print(f"  前後除外処理完了。 {original_count} -> {len(df_out)} イベント ({removed} 件除外)")
+    print(
+        f"  前後除外処理完了。 {original_count} -> {len(df_out)} イベント ({removed} 件除外)")
     return df_out
 
 
@@ -229,7 +230,7 @@ class GaitAnalysisApp:
     def __init__(self, master):
         self.master = master
         master.title("歩行データ同期・周期同定・パラメータ算出ツール")
-        master.geometry("900x800")  # 高さを確保
+        master.geometry("1200x800")  # 初期表示の幅を拡大
         self.input_file_path = None
         self.sampling_rate = None
         self.sync_data_df = None             # 同期済み全IMUデータ
@@ -359,8 +360,10 @@ class GaitAnalysisApp:
         self.trunk_mst_label.pack(side=LEFT, padx=2)
 
         # --- セグメント分割用パラメータ (IC間隔) ---
-        segment_param_frame = Frame(param_area_frame, borderwidth=1, relief=tk.GROOVE)
-        segment_param_frame.pack(side=LEFT, padx=5, pady=2, fill=tk.Y, anchor=tk.N)
+        segment_param_frame = Frame(
+            param_area_frame, borderwidth=1, relief=tk.GROOVE)
+        segment_param_frame.pack(
+            side=LEFT, padx=5, pady=2, fill=tk.Y, anchor=tk.N)
         Label(segment_param_frame, text="セグメント分割閾値").pack(pady=2)
         self.max_interval_var = tk.DoubleVar(value=MAX_IC_INTERVAL_SEC)
         frame_si = Frame(segment_param_frame)
@@ -370,7 +373,8 @@ class GaitAnalysisApp:
                          variable=self.max_interval_var, length=100,
                          command=lambda v: self.max_interval_label.config(text=f"{float(v):.1f}"))
         scale_si.pack(side=LEFT)
-        self.max_interval_label = Label(frame_si, text=f"{self.max_interval_var.get():.1f}", width=5)
+        self.max_interval_label = Label(
+            frame_si, text=f"{self.max_interval_var.get():.1f}", width=5)
         self.max_interval_label.pack(side=LEFT, padx=2)
 
         # --- 実行ボタンエリア ---
@@ -548,7 +552,8 @@ class GaitAnalysisApp:
             identifier = full_stem.rsplit('_', 1)[0]
             output_folder = Path(f"./{OUTPUT_FOLDER.name}_{identifier}")
             output_folder.mkdir(parents=True, exist_ok=True)
-            output_sync_file = output_folder   / (identifier + OUTPUT_SUFFIX_SYNC)
+            output_sync_file = output_folder / \
+                (identifier + OUTPUT_SUFFIX_SYNC)
             print(f"\n[ステップ1.1] 同期済み全IMUデータ保存中...")
             save_results(output_sync_file, self.sync_data_df, "同期済みIMUデータ")
 
@@ -556,7 +561,7 @@ class GaitAnalysisApp:
             gait_events_df_shank_all = None
             if self.sync_data_df is not None:
                 print("\n[ステップ2] 歩行周期の同定 (下腿 Gyro Z) を実行中...")
-                current_swing_threshold = SHANK_SWING_THRESHOLD  # 設定値を使用
+                current_swing_threshold = SHANK_SWING_THRESHOLD
                 gait_events_result_shank = identify_gait_cycles(
                     sync_gyro_df=self.sync_data_df,
                     sampling_rate_hz=self.sampling_rate,
@@ -582,7 +587,8 @@ class GaitAnalysisApp:
                     )
                     # 検出された下腿IC候補の先頭10件を確認
                     print("下腿IC候補(先頭10件):")
-                    print(gait_events_df_shank_all[['Leg','IC_Time','FO_Time']].head(10).to_string(index=False))
+                    print(gait_events_df_shank_all[['Leg', 'IC_Time', 'FO_Time']].head(
+                        10).to_string(index=False))
 
             # === ステップ 2bis: 歩行周期同定 (体幹 Acc Z/Y ベース IC+LR) ===
             if self.sync_data_df is not None and self.time_vector is not None:
@@ -621,7 +627,8 @@ class GaitAnalysisApp:
                             min_ics_per_trial=1        # 最低1ICを残す
                         )
                         # デバッグ: セグメンテーション後のイベント数
-                        print(f"[DEBUG] 体幹セグメント化後のイベント数: {0 if trunk_segmented is None else len(trunk_segmented)}")
+                        print(
+                            f"[DEBUG] 体幹セグメント化後のイベント数: {0 if trunk_segmented is None else len(trunk_segmented)}")
                         if trunk_segmented is None or trunk_segmented.empty:
                             print("  体幹ICに基づく歩行区間分割結果なし")
                         else:
@@ -632,7 +639,8 @@ class GaitAnalysisApp:
                             trunk_filtered = trunk_segmented.groupby('Trial_ID') \
                                                             .filter(lambda g: len(g) > 16)
                             # デバッグ: 小セグメント除去後のイベント数: {len(trunk_filtered)}
-                            print(f"# デバッグ: 小セグメント除去後のイベント数: {len(trunk_filtered)}")
+                            print(
+                                f"# デバッグ: 小セグメント除去後のイベント数: {len(trunk_filtered)}")
                             removed = before_cnt - len(trunk_filtered)
                             print(
                                 f"  小セグメント(≤16 IC)を {removed} イベント分除去 → 残り {len(trunk_filtered)} イベント")
@@ -649,12 +657,14 @@ class GaitAnalysisApp:
                                 n_end=TRUNK_NUM_ICS_REMOVE_END
                             )
                             # デバッグ: トリミング後最終イベント数: {len(ic_events_df_trunk)}
-                            print(f"# デバッグ: トリミング後最終イベント数: {len(ic_events_df_trunk)}")
+                            print(
+                                f"# デバッグ: トリミング後最終イベント数: {len(ic_events_df_trunk)}")
                             removed_ic = ic_before - len(ic_events_df_trunk)
                             print(
                                 f"  定常歩行区間抽出: {removed_ic} 件除去 → 残り {len(ic_events_df_trunk)} 件")
 
-                        output_gait_file_trunk_ic = output_folder   / (identifier + OUTPUT_SUFFIX_GAIT_TRUNK_IC)
+                        output_gait_file_trunk_ic = output_folder / \
+                            (identifier + OUTPUT_SUFFIX_GAIT_TRUNK_IC)
                         print(f"\n[ステップ2bis.1] 体幹ICイベントデータ保存中...")
                         save_results(output_gait_file_trunk_ic,
                                      ic_events_df_trunk, "ICイベントデータ(体幹)")
@@ -679,58 +689,81 @@ class GaitAnalysisApp:
 
                         # --- トランクVT加速度のバンドパスフィルタリング (0.1–20Hz) ---
                         vt_raw = self.sync_data_df[f'{TRUNK_PREFIX}_Acc_Y_aligned'].values
-                        b, a = butter(4, [0.1, 20], btype='band', fs=self.sampling_rate)
+                        b, a = butter(
+                            4, [0.1, 20], btype='band', fs=self.sampling_rate)
                         filtered_vt = filtfilt(b, a, vt_raw)
                         # --- トランクML加速度のバンドパスフィルタリング (0.1–20Hz) ---
                         ml_raw = self.sync_data_df[f'{TRUNK_PREFIX}_Acc_X_aligned'].values
                         filtered_ml = filtfilt(b, a, ml_raw)
 
                         # --- ステップ2bis.3: Trunk Harmonic Ratio (AP/VT/ML) の計算 ---
-                        print("\n[ステップ2bis.3] Trunk Harmonic Ratio (AP/VT/ML) の計算中...")
+                        print(
+                            "\n[ステップ2bis.3] Trunk Harmonic Ratio (AP/VT/ML) の計算中...")
                         hr_list_ap, hr_list_vt, hr_list_ml = [], [], []
                         for trial_id, grp in ic_events_df_trunk.groupby('Trial_ID', sort=False):
-                            times = grp.sort_values('IC_Time')['IC_Time'].values
+                            times = grp.sort_values('IC_Time')[
+                                'IC_Time'].values
                             for i in range(len(times) - 1):
                                 t0, t1 = times[i], times[i+1]
-                                idx0 = np.searchsorted(self.time_vector, t0, side='left')
-                                idx1 = np.searchsorted(self.time_vector, t1, side='left')
+                                idx0 = np.searchsorted(
+                                    self.time_vector, t0, side='left')
+                                idx1 = np.searchsorted(
+                                    self.time_vector, t1, side='left')
                                 seg_ap = fa_trunk[idx0:idx1]
                                 seg_vt = filtered_vt[idx0:idx1]
                                 seg_ml = filtered_ml[idx0:idx1]
-                                hr_ap = calculate_harmonic_ratio(seg_ap, self.sampling_rate, axis='AP')
-                                hr_vt = calculate_harmonic_ratio(seg_vt, self.sampling_rate, axis='VT')
-                                hr_ml = calculate_harmonic_ratio(seg_ml, self.sampling_rate, axis='ML')
+                                hr_ap = calculate_harmonic_ratio(
+                                    seg_ap, self.sampling_rate, axis='AP')
+                                hr_vt = calculate_harmonic_ratio(
+                                    seg_vt, self.sampling_rate, axis='VT')
+                                hr_ml = calculate_harmonic_ratio(
+                                    seg_ml, self.sampling_rate, axis='ML')
                                 hr_list_ap.append(hr_ap)
                                 hr_list_vt.append(hr_vt)
                                 hr_list_ml.append(hr_ml)
-                        mean_hr_ap = float(np.nanmean(hr_list_ap)) if hr_list_ap else np.nan
-                        mean_hr_vt = float(np.nanmean(hr_list_vt)) if hr_list_vt else np.nan
-                        mean_hr_ml = float(np.nanmean(hr_list_ml)) if hr_list_ml else np.nan
+                        mean_hr_ap = float(np.nanmean(
+                            hr_list_ap)) if hr_list_ap else np.nan
+                        mean_hr_vt = float(np.nanmean(
+                            hr_list_vt)) if hr_list_vt else np.nan
+                        mean_hr_ml = float(np.nanmean(
+                            hr_list_ml)) if hr_list_ml else np.nan
 
                         # Calculate integrated HR (iHR) per cycle
                         ihr_list_ap, ihr_list_vt, ihr_list_ml = [], [], []
                         for trial_id, grp in ic_events_df_trunk.groupby('Trial_ID', sort=False):
-                            times = grp.sort_values('IC_Time')['IC_Time'].values
+                            times = grp.sort_values('IC_Time')[
+                                'IC_Time'].values
                             for i in range(len(times) - 1):
                                 t0, t1 = times[i], times[i+1]
-                                idx0 = np.searchsorted(self.time_vector, t0, side='left')
-                                idx1 = np.searchsorted(self.time_vector, t1, side='left')
+                                idx0 = np.searchsorted(
+                                    self.time_vector, t0, side='left')
+                                idx1 = np.searchsorted(
+                                    self.time_vector, t1, side='left')
                                 seg_ap = fa_trunk[idx0:idx1]
                                 seg_vt = filtered_vt[idx0:idx1]
                                 seg_ml = filtered_ml[idx0:idx1]
-                                ihr_ap = calculate_integrated_harmonic_ratio(seg_ap, self.sampling_rate, axis='AP')
-                                ihr_vt = calculate_integrated_harmonic_ratio(seg_vt, self.sampling_rate, axis='VT')
-                                ihr_ml = calculate_integrated_harmonic_ratio(seg_ml, self.sampling_rate, axis='ML')
+                                ihr_ap = calculate_integrated_harmonic_ratio(
+                                    seg_ap, self.sampling_rate, axis='AP')
+                                ihr_vt = calculate_integrated_harmonic_ratio(
+                                    seg_vt, self.sampling_rate, axis='VT')
+                                ihr_ml = calculate_integrated_harmonic_ratio(
+                                    seg_ml, self.sampling_rate, axis='ML')
                                 ihr_list_ap.append(ihr_ap)
                                 ihr_list_vt.append(ihr_vt)
                                 ihr_list_ml.append(ihr_ml)
-                        mean_ihr_ap = float(np.nanmean(ihr_list_ap)) if ihr_list_ap else np.nan
-                        mean_ihr_vt = float(np.nanmean(ihr_list_vt)) if ihr_list_vt else np.nan
-                        mean_ihr_ml = float(np.nanmean(ihr_list_ml)) if ihr_list_ml else np.nan
-                        print(f"  → iHR_AP: {mean_ihr_ap:.2f}%, iHR_VT: {mean_ihr_vt:.2f}%, iHR_ML: {mean_ihr_ml:.2f}%")
+                        mean_ihr_ap = float(np.nanmean(
+                            ihr_list_ap)) if ihr_list_ap else np.nan
+                        mean_ihr_vt = float(np.nanmean(
+                            ihr_list_vt)) if ihr_list_vt else np.nan
+                        mean_ihr_ml = float(np.nanmean(
+                            ihr_list_ml)) if ihr_list_ml else np.nan
+                        print(
+                            f"  → iHR_AP: {mean_ihr_ap:.2f}%, iHR_VT: {mean_ihr_vt:.2f}%, iHR_ML: {mean_ihr_ml:.2f}%")
 
-                        print(f"  → HR_AP: {mean_hr_ap:.3f}, HR_VT: {mean_hr_vt:.3f}, HR_ML: {mean_hr_ml:.3f}")
-                        print(f"[STEP 2bis.3] Final Harmonic Ratios - AP: {mean_hr_ap:.3f}, VT: {mean_hr_vt:.3f}, ML: {mean_hr_ml:.3f}")
+                        print(
+                            f"  → HR_AP: {mean_hr_ap:.3f}, HR_VT: {mean_hr_vt:.3f}, HR_ML: {mean_hr_ml:.3f}")
+                        print(
+                            f"[STEP 2bis.3] Final Harmonic Ratios - AP: {mean_hr_ap:.3f}, VT: {mean_hr_vt:.3f}, ML: {mean_hr_ml:.3f}")
 
                         if fa_trunk is not None and fl_trunk is not None and tv_trunk is not None:
                             self.plot_trunk_ics(
@@ -746,7 +779,8 @@ class GaitAnalysisApp:
                 gait_events_df_shank_segmented = segment_walking_trials(
                     gait_events_df_shank_all, self.max_interval_var.get(), MIN_ICS_PER_TRIAL)
                 # デバッグ: セグメンテーション後の下腿イベント数
-                print(f"[DEBUG][Shank] セグメント化後のイベント数: {len(gait_events_df_shank_segmented) if gait_events_df_shank_segmented is not None else 0}")
+                print(
+                    f"[DEBUG][Shank] セグメント化後のイベント数: {len(gait_events_df_shank_segmented) if gait_events_df_shank_segmented is not None else 0}")
                 # --- per-trial stumble truncation for shank events ---
                 cleaned_segments = []
                 for trial_id, trial_grp in gait_events_df_shank_segmented.groupby('Trial_ID'):
@@ -774,13 +808,16 @@ class GaitAnalysisApp:
                     if t_cand:
                         t_stumble = min(t_cand)
                         # only apply if at least 3 IC events precede the stumble
-                        pre_ic = trial_grp.loc[trial_grp['IC_Time'] < t_stumble]
+                        pre_ic = trial_grp.loc[trial_grp['IC_Time']
+                                               < t_stumble]
                         if len(pre_ic) >= 3:
                             # filter out events after stumble using row labels
                             trial_grp = trial_grp.loc[pre_ic.index]
-                            trial_grp = trial_grp.loc[trial_grp['IC_Time'] < t_stumble]
+                            trial_grp = trial_grp.loc[trial_grp['IC_Time']
+                                                      < t_stumble]
                             if 'FO_Time' in trial_grp.columns:
-                                trial_grp = trial_grp.loc[trial_grp['FO_Time'] < t_stumble]
+                                trial_grp = trial_grp.loc[trial_grp['FO_Time']
+                                                          < t_stumble]
                         else:
                             # do not truncate this trial (stumble too early, likely noise)
                             pass
@@ -790,19 +827,23 @@ class GaitAnalysisApp:
                 print(
                     f"  [Shank] Per-trial stumble truncation applied, remaining events: {len(gait_events_df_shank_segmented)}")
                 # デバッグ: トランクケーション後の下腿イベント数
-                print(f"[DEBUG][Shank] つまずき後のイベント数: {len(gait_events_df_shank_segmented)}")
+                print(
+                    f"[DEBUG][Shank] つまずき後のイベント数: {len(gait_events_df_shank_segmented)}")
                 if not gait_events_df_shank_segmented.empty:
                     print("\n[ステップ2.2] 定常歩行部分の抽出（前後除外, 下腿ベース）を実行中...")
                     # デバッグ: トリミング前の下腿イベント数
-                    print(f"[DEBUG][Shank] トリミング前イベント数: {len(gait_events_df_shank_segmented)}")
+                    print(
+                        f"[DEBUG][Shank] トリミング前イベント数: {len(gait_events_df_shank_segmented)}")
                     gait_events_df_shank_steady = trim_trial_ends(
                         gait_events_df_shank_segmented, NUM_ICS_REMOVE_START, NUM_ICS_REMOVE_END)
                     self.gait_events_shank_steady = gait_events_df_shank_steady  # 結果保持
                     # デバッグ: トリミング後の下腿イベント数
-                    print(f"[DEBUG][Shank] トリミング後イベント数: {len(self.gait_events_shank_steady)}")
+                    print(
+                        f"[DEBUG][Shank] トリミング後イベント数: {len(self.gait_events_shank_steady)}")
                     if not self.gait_events_shank_steady.empty:
                         # 保存
-                        output_gait_file = output_folder   / (identifier + OUTPUT_SUFFIX_GAIT_TRIMMED)
+                        output_gait_file = output_folder / \
+                            (identifier + OUTPUT_SUFFIX_GAIT_TRIMMED)
                         print(f"\n[ステップ2.3] 定常歩行周期データ(下腿ベース)保存中...")
                         save_results(
                             output_gait_file, self.gait_events_shank_steady, "定常歩行周期(下腿GyroZ)")
@@ -849,17 +890,20 @@ class GaitAnalysisApp:
                                     value, (float, np.floating)) else f"  {key}: {value}")
                             print("--------------------")
                             # Trunk Harmonic Ratios (from earlier computation)
-                            print(f"  HR_AP: {mean_hr_ap:.3f}, HR_VT: {mean_hr_vt:.3f}, HR_ML: {mean_hr_ml:.3f}")
+                            print(
+                                f"  HR_AP: {mean_hr_ap:.3f}, HR_VT: {mean_hr_vt:.3f}, HR_ML: {mean_hr_ml:.3f}")
                             # Integrated Harmonic Ratios (iHR)
-                            print(f"  iHR_AP: {mean_ihr_ap:.2f}%, iHR_VT: {mean_ihr_vt:.2f}%, iHR_ML: {mean_ihr_ml:.2f}%")
+                            print(
+                                f"  iHR_AP: {mean_ihr_ap:.2f}%, iHR_VT: {mean_ihr_vt:.2f}%, iHR_ML: {mean_ihr_ml:.2f}%")
                             # Add iHRs to results_all for CSV
-                            results_all['HR_AP']  = mean_hr_ap
-                            results_all['HR_VT']  = mean_hr_vt
-                            results_all['HR_ML']  = mean_hr_ml
+                            results_all['HR_AP'] = mean_hr_ap
+                            results_all['HR_VT'] = mean_hr_vt
+                            results_all['HR_ML'] = mean_hr_ml
                             results_all['iHR_AP'] = mean_ihr_ap
                             results_all['iHR_VT'] = mean_ihr_vt
                             results_all['iHR_ML'] = mean_ihr_ml
-                            output_all_params_file = output_folder   / (identifier + OUTPUT_ALL_PARAMS_FILE)
+                            output_all_params_file = output_folder / \
+                                (identifier + OUTPUT_ALL_PARAMS_FILE)
                             print(f"\n[ステップ3.1] 全パラメータ(下腿ベース)保存中...")
                             save_results(output_all_params_file, pd.DataFrame(
                                 [results_all]), "全歩行パラメータ(下腿ベース)")
@@ -901,7 +945,8 @@ class GaitAnalysisApp:
                 reassigned = []
                 for tid, grp in gait_events_df_shank_steady.groupby('Trial_ID', sort=True):
                     t0, t1 = grp['IC_Time'].min(), grp['IC_Time'].max()
-                    sel = trunk_df[(trunk_df['IC_Time'] >= t0) & (trunk_df['IC_Time'] <= t1)].copy()
+                    sel = trunk_df[(trunk_df['IC_Time'] >= t0) & (
+                        trunk_df['IC_Time'] <= t1)].copy()
                     if not sel.empty:
                         sel['Trial_ID'] = tid
                         reassigned.append(sel)
@@ -909,13 +954,15 @@ class GaitAnalysisApp:
                     trunk_df = pd.concat(reassigned).reset_index(drop=True)
             self._fb_trunk_df = trunk_df
             self._fb_shank_df = gait_events_df_shank_steady
-            self._fb_trunk_signals = {'AP': fa_trunk, 'VT': filtered_vt, 'ML': filtered_ml}
+            self._fb_trunk_signals = {'AP': fa_trunk,
+                                      'VT': filtered_vt, 'ML': filtered_ml}
             self._fb_shank_signals = filtered_signals_gyro
             self._fb_time_vector = self.time_vector
             self._fb_results = results_all
             self.feedback_button.config(state=NORMAL)
             # セグメント選択肢を更新
-            ids = sorted(self._fb_shank_df['Trial_ID'].unique()) if self._fb_shank_df is not None and not self._fb_shank_df.empty else []
+            ids = sorted(self._fb_shank_df['Trial_ID'].unique(
+            )) if self._fb_shank_df is not None and not self._fb_shank_df.empty else []
             if ids:
                 self.segment_combo.config(values=ids, state='readonly')
                 self.segment_var.set(ids[0])
@@ -1039,8 +1086,10 @@ class GaitAnalysisApp:
         try:
             # 選択されたセグメントIDでDataFrameをフィルタ
             sid = self.segment_var.get()
-            td = self._fb_trunk_df[self._fb_trunk_df['Trial_ID'] == sid] if self._fb_trunk_df is not None else None
-            sd = self._fb_shank_df[self._fb_shank_df['Trial_ID'] == sid] if self._fb_shank_df is not None else None
+            td = self._fb_trunk_df[self._fb_trunk_df['Trial_ID']
+                                   == sid] if self._fb_trunk_df is not None else None
+            sd = self._fb_shank_df[self._fb_shank_df['Trial_ID']
+                                   == sid] if self._fb_shank_df is not None else None
             show_feedback_window(
                 parent=self.master,
                 trunk_df=td,
